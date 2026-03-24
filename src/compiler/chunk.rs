@@ -234,7 +234,7 @@ pub struct UpvalueInfo {
 }
 
 /// A compiled module
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Module {
     pub main: Function,
     pub functions: Vec<Function>,
