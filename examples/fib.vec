@@ -1,0 +1,14 @@
+// Fibonacci sequence
+fn fib(n) {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+// Print first 20 fibonacci numbers
+let mut i = 0
+while i <= 20 {
+    print("fib(" ++ str(i) ++ ") = " ++ str(fib(i)))
+    i = i + 1
+}

@@ -230,14 +230,10 @@ impl Compiler {
         match stmt {
             Stmt::Expr(expr) => {
                 // Expression statement - compile to temp register above locals
+                // Don't move to r0 here - that clobbers locals. The compiler's
+                // compile() method handles returning the last expression value.
                 let temp = self.next_temp_register();
                 self.compile_expr(expr, temp)?;
-                // Move result to r0 for potential return
-                if temp != 0 {
-                    self.emit(OpCode::Move);
-                    self.emit_byte(0);
-                    self.emit_byte(temp);
-                }
             }
 
             Stmt::Let(name, _is_mut, initializer) => {

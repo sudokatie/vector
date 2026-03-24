@@ -76,19 +76,31 @@ impl Compiler {
     }
 
     pub fn compile(&mut self, stmts: &[Stmt]) -> Result<Module, CompileError> {
-        let mut last_was_expr = false;
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last = i == stmts.len() - 1;
 
-        for stmt in stmts {
-            last_was_expr = matches!(stmt, Stmt::Expr(_));
-            self.compile_stmt(stmt)?;
+            if is_last && matches!(stmt, Stmt::Expr(_)) {
+                // Last statement is an expression - compile it to r0 for return
+                if let Stmt::Expr(expr) = stmt {
+                    // Use a temp register that won't clobber locals
+                    let temp = self.next_temp_register().max(1);
+                    self.compile_expr(expr, temp)?;
+                    // Move to return register
+                    self.emit(OpCode::Move);
+                    self.emit_byte(0);
+                    self.emit_byte(temp);
+                    // Return that value
+                    self.emit(OpCode::Return);
+                    self.emit_byte(0);
+                    self.emit_byte(0);
+                }
+            } else {
+                self.compile_stmt(stmt)?;
+            }
         }
 
-        // Return last expression value (for REPL) or nil
-        if last_was_expr {
-            self.emit(OpCode::Return);
-            self.emit_byte(0);
-            self.emit_byte(0);
-        } else {
+        // If the last statement wasn't an expression, return nil
+        if stmts.is_empty() || !matches!(stmts.last(), Some(Stmt::Expr(_))) {
             self.emit(OpCode::ReturnNil);
             self.emit_byte(0);
         }

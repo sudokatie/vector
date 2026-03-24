@@ -99,7 +99,7 @@ impl Chunk {
 
     fn disassemble_instruction(&self, offset: usize) -> (String, usize) {
         let op = OpCode::try_from(self.code[offset]).unwrap_or(OpCode::LoadNil);
-        let line = self.get_line(offset);
+        let _line = self.get_line(offset);
 
         match op {
             OpCode::LoadNil | OpCode::LoadTrue | OpCode::LoadFalse | OpCode::ReturnNil => {

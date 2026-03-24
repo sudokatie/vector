@@ -3,7 +3,7 @@
 use super::{VM, RuntimeError};
 use super::value::Value;
 use super::frame::CallFrame;
-use crate::compiler::{OpCode, Function, Module};
+use crate::compiler::{OpCode, Module};
 use std::rc::Rc;
 
 impl VM {
