@@ -229,8 +229,15 @@ impl Compiler {
     pub fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
         match stmt {
             Stmt::Expr(expr) => {
-                // Expression statement - compile to r0 and discard
-                self.compile_expr(expr, 0)?;
+                // Expression statement - compile to temp register above locals
+                let temp = self.next_temp_register();
+                self.compile_expr(expr, temp)?;
+                // Move result to r0 for potential return
+                if temp != 0 {
+                    self.emit(OpCode::Move);
+                    self.emit_byte(0);
+                    self.emit_byte(temp);
+                }
             }
 
             Stmt::Let(name, _is_mut, initializer) => {
@@ -291,10 +298,11 @@ impl Compiler {
             }
 
             Stmt::If(cond, then_branch, else_branch) => {
-                self.compile_expr(cond, 0)?;
+                let temp = self.next_temp_register();
+                self.compile_expr(cond, temp)?;
 
                 self.emit(OpCode::JumpIfNot);
-                self.emit_byte(0);
+                self.emit_byte(temp);
                 let else_jump = self.emit_jump_placeholder();
 
                 for stmt in then_branch {
@@ -318,10 +326,11 @@ impl Compiler {
             Stmt::While(cond, body) => {
                 let loop_start = self.current_offset();
 
-                self.compile_expr(cond, 0)?;
+                let temp = self.next_temp_register();
+                self.compile_expr(cond, temp)?;
 
                 self.emit(OpCode::JumpIfNot);
-                self.emit_byte(0);
+                self.emit_byte(temp);
                 let exit_jump = self.emit_jump_placeholder();
 
                 self.begin_scope();

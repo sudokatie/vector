@@ -76,13 +76,22 @@ impl Compiler {
     }
 
     pub fn compile(&mut self, stmts: &[Stmt]) -> Result<Module, CompileError> {
+        let mut last_was_expr = false;
+
         for stmt in stmts {
+            last_was_expr = matches!(stmt, Stmt::Expr(_));
             self.compile_stmt(stmt)?;
         }
 
-        // Implicit return nil at end
-        self.emit(OpCode::ReturnNil);
-        self.emit_byte(0);
+        // Return last expression value (for REPL) or nil
+        if last_was_expr {
+            self.emit(OpCode::Return);
+            self.emit_byte(0);
+            self.emit_byte(0);
+        } else {
+            self.emit(OpCode::ReturnNil);
+            self.emit_byte(0);
+        }
 
         Ok(Module {
             main: std::mem::replace(&mut self.function, Function::new("", 0)),
@@ -195,6 +204,11 @@ impl Compiler {
         });
 
         Ok(slot)
+    }
+
+    /// Get the next available temp register (above all locals)
+    pub(crate) fn next_temp_register(&self) -> u8 {
+        self.locals.len() as u8
     }
 
     pub(crate) fn resolve_local(&self, name: &str) -> Option<u8> {
