@@ -4,6 +4,7 @@ use super::{VM, RuntimeError};
 use super::value::Value;
 use super::frame::CallFrame;
 use crate::compiler::{OpCode, Module};
+use crate::jit::TypeTag;
 use std::rc::Rc;
 
 impl VM {
@@ -13,10 +14,47 @@ impl VM {
         let main = Rc::new(module.main);
         self.functions = module.functions.into_iter().map(Rc::new).collect();
 
+        // Initialize JIT profiling for all functions
+        if let Some(jit) = &mut self.jit {
+            for (i, func) in self.functions.iter().enumerate() {
+                jit.init_function(i, func.arity);
+            }
+        }
+
         let frame = CallFrame::new(main, 0);
         self.frames.push(frame);
 
         self.execute()
+    }
+
+    /// Record a function call for JIT profiling
+    fn profile_call(&mut self, func_idx: usize) {
+        if let Some(jit) = &mut self.jit {
+            jit.record_call(func_idx);
+        }
+    }
+
+    /// Record a loop iteration for JIT profiling
+    fn profile_loop(&mut self, loop_offset: usize) {
+        if let Some(jit) = &mut self.jit {
+            // Use current function index
+            let func_idx = self.frames.len().saturating_sub(1);
+            jit.record_loop(func_idx, loop_offset);
+        }
+    }
+
+    /// Get type tag for a value (for profiling)
+    fn value_type_tag(value: &Value) -> TypeTag {
+        match value {
+            Value::Nil => TypeTag::Nil,
+            Value::Bool(_) => TypeTag::Bool,
+            Value::Int(_) => TypeTag::Int,
+            Value::Float(_) => TypeTag::Float,
+            Value::String(_) => TypeTag::String,
+            Value::Array(_) => TypeTag::Array,
+            Value::Table(_) => TypeTag::Table,
+            Value::Function(_) | Value::NativeFunction(_) => TypeTag::Function,
+        }
     }
 
     /// Main execution loop
@@ -270,6 +308,8 @@ impl VM {
 
                 OpCode::Loop => {
                     let offset = self.read_u16()?;
+                    let loop_start = self.frame().ip - offset as usize;
+                    self.profile_loop(loop_start);
                     self.frame_mut().ip -= offset as usize;
                 }
 
@@ -282,6 +322,9 @@ impl VM {
                     let callee = self.get_register(func_reg).clone();
                     match callee {
                         Value::Function(func_idx) => {
+                            // Profile the call
+                            self.profile_call(func_idx as usize);
+
                             let func = self.functions[func_idx as usize].clone();
                             if func.arity != argc {
                                 return Err(RuntimeError::ArityMismatch {
@@ -291,15 +334,13 @@ impl VM {
                             }
 
                             // Copy arguments to new frame
-                            let mut new_frame = CallFrame::new(func, self.frames.len());
+                            let mut new_frame = CallFrame::new_with_return(func, self.frames.len(), dst);
 
                             for i in 0..argc {
                                 let arg = self.get_register(dst + 1 + i).clone();
                                 new_frame.set_register(i, arg);
                             }
 
-                            // Save return info
-                            self.return_register = dst;
                             self.frames.push(new_frame);
                         }
                         Value::NativeFunction(native_fn) => {
@@ -319,23 +360,29 @@ impl VM {
                     let src = self.read_byte()?;
                     let result = self.get_register(src).clone();
 
+                    // Get return register before popping
+                    let return_reg = self.frame().return_register;
                     self.frames.pop();
+
                     if self.frames.is_empty() {
                         return Ok(result);
                     }
 
-                    self.set_register(self.return_register, result);
+                    self.set_register(return_reg, result);
                 }
 
                 OpCode::ReturnNil => {
                     let _dst = self.read_byte()?;
 
+                    // Get return register before popping
+                    let return_reg = self.frame().return_register;
                     self.frames.pop();
+
                     if self.frames.is_empty() {
                         return Ok(Value::Nil);
                     }
 
-                    self.set_register(self.return_register, Value::Nil);
+                    self.set_register(return_reg, Value::Nil);
                 }
 
                 OpCode::TailCall => {

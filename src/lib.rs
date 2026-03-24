@@ -26,6 +26,13 @@ impl Vector {
         }
     }
 
+    /// Create a new Vector interpreter without JIT (interpreter only)
+    pub fn new_without_jit() -> Self {
+        Self {
+            vm: vm::VM::new_without_jit(),
+        }
+    }
+
     /// Evaluate source code and return the result
     pub fn eval(&mut self, source: &str) -> Result<vm::Value, VectorError> {
         let tokens = lexer::Lexer::new(source);
@@ -40,6 +47,21 @@ impl Vector {
         let source = std::fs::read_to_string(path)
             .map_err(|e| VectorError::Io(e.to_string()))?;
         self.eval(&source)
+    }
+
+    /// Enable or disable JIT compilation
+    pub fn set_jit_enabled(&mut self, enabled: bool) {
+        self.vm.set_jit_enabled(enabled);
+    }
+
+    /// Get JIT statistics
+    pub fn jit_stats(&self) -> Option<&jit::JitStats> {
+        self.vm.jit_stats()
+    }
+
+    /// Get profiler statistics
+    pub fn profiler_stats(&self) -> Option<&jit::ProfilerStats> {
+        self.vm.profiler_stats()
     }
 }
 

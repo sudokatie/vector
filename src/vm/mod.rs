@@ -8,6 +8,7 @@ pub use value::Value;
 pub use frame::CallFrame;
 
 use crate::compiler::Function;
+use crate::jit::{Jit, TypeTag};
 use thiserror::Error;
 use std::rc::Rc;
 
@@ -55,7 +56,10 @@ pub struct VM {
     frames: Vec<CallFrame>,
     functions: Vec<Rc<Function>>,
     globals: fnv::FnvHashMap<String, Value>,
-    return_register: u8,
+    /// JIT compiler (optional)
+    jit: Option<Jit>,
+    /// Whether JIT is enabled
+    jit_enabled: bool,
 }
 
 impl VM {
@@ -64,10 +68,46 @@ impl VM {
             frames: Vec::with_capacity(64),
             functions: Vec::new(),
             globals: fnv::FnvHashMap::default(),
-            return_register: 0,
+            jit: Some(Jit::new()),
+            jit_enabled: true,
         };
         vm.register_stdlib();
         vm
+    }
+
+    /// Create VM without JIT (interpreter only)
+    pub fn new_without_jit() -> Self {
+        let mut vm = Self {
+            frames: Vec::with_capacity(64),
+            functions: Vec::new(),
+            globals: fnv::FnvHashMap::default(),
+            jit: None,
+            jit_enabled: false,
+        };
+        vm.register_stdlib();
+        vm
+    }
+
+    /// Enable or disable JIT compilation
+    pub fn set_jit_enabled(&mut self, enabled: bool) {
+        self.jit_enabled = enabled;
+        if let Some(jit) = &mut self.jit {
+            if enabled {
+                jit.enable();
+            } else {
+                jit.disable();
+            }
+        }
+    }
+
+    /// Get JIT statistics
+    pub fn jit_stats(&self) -> Option<&crate::jit::JitStats> {
+        self.jit.as_ref().map(|j| &j.stats)
+    }
+
+    /// Get profiler statistics
+    pub fn profiler_stats(&self) -> Option<&crate::jit::ProfilerStats> {
+        self.jit.as_ref().map(|j| &j.profiler.stats)
     }
 
     fn register_stdlib(&mut self) {
@@ -308,5 +348,31 @@ mod tests {
         assert!(vm.globals.contains_key("print"));
         assert!(vm.globals.contains_key("type"));
         assert!(vm.globals.contains_key("len"));
+    }
+
+    #[test]
+    fn test_vm_with_jit() {
+        let vm = VM::new();
+        assert!(vm.jit.is_some());
+        assert!(vm.jit_enabled);
+    }
+
+    #[test]
+    fn test_vm_without_jit() {
+        let vm = VM::new_without_jit();
+        assert!(vm.jit.is_none());
+        assert!(!vm.jit_enabled);
+    }
+
+    #[test]
+    fn test_vm_jit_toggle() {
+        let mut vm = VM::new();
+        assert!(vm.jit_enabled);
+
+        vm.set_jit_enabled(false);
+        assert!(!vm.jit_enabled);
+
+        vm.set_jit_enabled(true);
+        assert!(vm.jit_enabled);
     }
 }

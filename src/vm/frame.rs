@@ -11,6 +11,8 @@ pub struct CallFrame {
     pub ip: usize,
     pub base: usize,
     pub registers: [Value; 256],
+    /// Where to store the return value in the caller's frame
+    pub return_register: u8,
 }
 
 impl CallFrame {
@@ -20,6 +22,17 @@ impl CallFrame {
             ip: 0,
             base,
             registers: std::array::from_fn(|_| Value::Nil),
+            return_register: 0,
+        }
+    }
+
+    pub fn new_with_return(function: Rc<Function>, base: usize, return_register: u8) -> Self {
+        Self {
+            function,
+            ip: 0,
+            base,
+            registers: std::array::from_fn(|_| Value::Nil),
+            return_register,
         }
     }
 

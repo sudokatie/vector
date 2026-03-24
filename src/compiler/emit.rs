@@ -382,10 +382,12 @@ impl Compiler {
 
             Stmt::Return(value) => {
                 if let Some(expr) = value {
-                    self.compile_expr(expr, 0)?;
+                    // Compile to temp register to avoid clobbering locals
+                    let temp = self.next_temp_register();
+                    self.compile_expr(expr, temp)?;
                     self.emit(OpCode::Return);
                     self.emit_byte(0);
-                    self.emit_byte(0);
+                    self.emit_byte(temp);
                 } else {
                     self.emit(OpCode::ReturnNil);
                     self.emit_byte(0);
