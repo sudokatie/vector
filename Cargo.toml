@@ -1,0 +1,32 @@
+[package]
+name = "vector"
+version = "0.1.0"
+edition = "2021"
+authors = ["Katie"]
+description = "JIT-compiled scripting language with register-based VM"
+license = "MIT"
+repository = "https://github.com/sudokatie/vector"
+
+[dependencies]
+cranelift-codegen = "0.116"
+cranelift-frontend = "0.116"
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-native = "0.116"
+rustyline = "14"
+fnv = "1.0"
+thiserror = "2"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "warn"
