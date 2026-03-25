@@ -8,6 +8,7 @@ pub use value::Value;
 pub use frame::CallFrame;
 
 use crate::compiler::Function;
+use crate::gc::{GC, GCStats};
 use crate::jit::{Jit, TypeTag};
 use thiserror::Error;
 use std::rc::Rc;
@@ -60,6 +61,8 @@ pub struct VM {
     jit: Option<Jit>,
     /// Whether JIT is enabled
     jit_enabled: bool,
+    /// Garbage collector
+    gc: GC,
 }
 
 impl VM {
@@ -70,6 +73,7 @@ impl VM {
             globals: fnv::FnvHashMap::default(),
             jit: Some(Jit::new()),
             jit_enabled: true,
+            gc: GC::new(),
         };
         vm.register_stdlib();
         vm
@@ -83,6 +87,21 @@ impl VM {
             globals: fnv::FnvHashMap::default(),
             jit: None,
             jit_enabled: false,
+            gc: GC::new(),
+        };
+        vm.register_stdlib();
+        vm
+    }
+
+    /// Create VM with custom heap size
+    pub fn with_heap_size(heap_size: usize) -> Self {
+        let mut vm = Self {
+            frames: Vec::with_capacity(64),
+            functions: Vec::new(),
+            globals: fnv::FnvHashMap::default(),
+            jit: Some(Jit::new()),
+            jit_enabled: true,
+            gc: GC::with_heap_size(heap_size),
         };
         vm.register_stdlib();
         vm
@@ -108,6 +127,29 @@ impl VM {
     /// Get profiler statistics
     pub fn profiler_stats(&self) -> Option<&crate::jit::ProfilerStats> {
         self.jit.as_ref().map(|j| &j.profiler.stats)
+    }
+
+    /// Get GC statistics
+    pub fn gc_stats(&self) -> &GCStats {
+        self.gc.stats()
+    }
+
+    /// Get heap information: (allocated, max_size, threshold)
+    pub fn heap_info(&self) -> (usize, usize, usize) {
+        self.gc.heap_info()
+    }
+
+    /// Trigger a garbage collection
+    pub fn collect_garbage(&mut self) {
+        // Enumerate roots from stack and globals
+        // Currently using Rc<RefCell> for heap objects, so GC is a no-op
+        // This infrastructure is ready for when Value is migrated to use GcRef
+        self.gc.collect();
+    }
+
+    /// Enable or disable automatic garbage collection
+    pub fn set_gc_auto_collect(&mut self, enabled: bool) {
+        self.gc.set_auto_collect(enabled);
     }
 
     fn register_stdlib(&mut self) {
@@ -374,5 +416,43 @@ mod tests {
 
         vm.set_jit_enabled(true);
         assert!(vm.jit_enabled);
+    }
+
+    #[test]
+    fn test_vm_gc_stats() {
+        let vm = VM::new();
+        let stats = vm.gc_stats();
+        assert_eq!(stats.collections, 0);
+    }
+
+    #[test]
+    fn test_vm_heap_info() {
+        let vm = VM::new();
+        let (allocated, max_size, threshold) = vm.heap_info();
+        assert_eq!(allocated, 0);
+        assert!(max_size > 0);
+        assert!(threshold > 0);
+    }
+
+    #[test]
+    fn test_vm_with_heap_size() {
+        let vm = VM::with_heap_size(16 * 1024 * 1024); // 16MB
+        let (_, max_size, _) = vm.heap_info();
+        assert_eq!(max_size, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_vm_collect_garbage() {
+        let mut vm = VM::new();
+        vm.collect_garbage();
+        assert_eq!(vm.gc_stats().collections, 1);
+    }
+
+    #[test]
+    fn test_vm_gc_auto_collect_toggle() {
+        let mut vm = VM::new();
+        vm.set_gc_auto_collect(false);
+        vm.set_gc_auto_collect(true);
+        // Just verify it doesn't panic
     }
 }
