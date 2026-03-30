@@ -26,6 +26,22 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Block(Vec<Stmt>),
     Function(FunctionDef),
+    
+    // Match expression
+    Match(Box<Expr>, Vec<MatchArm>),
+    
+    // Try expression (returns Result-like value)
+    Try(Box<Expr>),
+    
+    // String interpolation
+    Interpolation(Vec<InterpolationPart>),
+}
+
+/// Part of an interpolated string
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpolationPart {
+    Literal(String),
+    Expr(Box<Expr>),
 }
 
 /// Statement AST node
@@ -93,4 +109,25 @@ pub struct FunctionDef {
     pub name: Option<String>,
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+}
+
+/// Pattern for match expressions
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    /// Literal value pattern
+    Literal(Expr),
+    /// Range pattern (start..end or start..=end)
+    Range(Box<Expr>, Box<Expr>, bool), // (start, end, inclusive)
+    /// Wildcard pattern (_)
+    Wildcard,
+    /// Variable binding pattern
+    Binding(String),
+}
+
+/// Match arm (pattern => expression)
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>, // Optional `if condition`
+    pub body: Expr,
 }

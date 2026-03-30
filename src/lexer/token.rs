@@ -23,6 +23,13 @@ impl Span {
     }
 }
 
+/// Part of an interpolated string
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringPart {
+    Literal(String),
+    Interpolation(String), // The expression source code
+}
+
 /// Token kinds (without values)
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -30,6 +37,7 @@ pub enum TokenKind {
     Int(i64),
     Float(f64),
     String(String),
+    InterpolatedString(Vec<StringPart>), // String with {expr} interpolations
     Identifier(String),
 
     // Keywords
@@ -152,6 +160,7 @@ impl fmt::Display for TokenKind {
             TokenKind::DotDotEqual => write!(f, "..="),
             TokenKind::FatArrow => write!(f, "=>"),
             TokenKind::Eof => write!(f, "EOF"),
+            TokenKind::InterpolatedString(_) => write!(f, "interpolated string"),
         }
     }
 }

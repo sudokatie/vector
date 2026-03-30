@@ -1,229 +1,301 @@
-//! Vector benchmarks
+//! Performance benchmarks for Vector
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use vector::lexer::Lexer;
-use vector::parser::Parser;
-use vector::compiler::Compiler;
-use vector::vm::VM;
+use vector::{Vector, lexer::Lexer, parser::Parser, compiler::Compiler};
 
-const SIMPLE_PROGRAM: &str = r#"
-let x = 42
-let y = 3.14
-let name = "hello"
-fn add(a, b) {
-    return a + b
-}
-if x > 0 {
-    x
-}
-"#;
-
-const ARITHMETIC_HEAVY: &str = r#"
-let mut sum = 0
-let mut i = 0
-while i < 1000 {
-    sum = sum + i * 2 - 1
-    i = i + 1
-}
-sum
-"#;
-
-const FUNCTION_CALLS: &str = r#"
-fn double(x) {
-    return x * 2
-}
-let mut result = 1
-let mut i = 0
-while i < 100 {
-    result = double(result)
-    if result > 1000000 {
-        result = 1
-    }
-    i = i + 1
-}
-result
-"#;
-
-const FIB_RECURSIVE: &str = r#"
-fn fib(n) {
-    if n < 2 {
-        return n
-    }
-    return fib(n - 1) + fib(n - 2)
-}
-fib(15)
-"#;
-
-fn parse(source: &str) -> Vec<vector::parser::Stmt> {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer);
-    parser.parse().unwrap()
-}
-
-fn compile(source: &str) -> vector::compiler::Module {
-    let ast = parse(source);
-    let mut compiler = Compiler::new();
-    compiler.compile(&ast).unwrap()
-}
-
-fn bench_lexer(c: &mut Criterion) {
-    c.bench_function("lexer/simple", |b| {
+/// Benchmark startup time
+fn bench_startup(c: &mut Criterion) {
+    c.bench_function("startup_repl", |b| {
         b.iter(|| {
-            let mut lexer = Lexer::new(black_box(SIMPLE_PROGRAM));
-            while let Ok(token) = lexer.next_token() {
-                if token.kind == vector::lexer::TokenKind::Eof {
-                    break;
+            let vector = Vector::new();
+            black_box(vector);
+        });
+    });
+
+    c.bench_function("startup_no_jit", |b| {
+        b.iter(|| {
+            let vector = Vector::new_without_jit();
+            black_box(vector);
+        });
+    });
+}
+
+/// Benchmark bytecode compilation speed
+fn bench_compile(c: &mut Criterion) {
+    let sources = vec![
+        ("small", "let x = 1 + 2\nx * 3"),
+        ("medium", r#"
+            fn fib(n) {
+                if n < 2 {
+                    return n
                 }
-                black_box(token);
+                return fib(n - 1) + fib(n - 2)
             }
-        })
-    });
+            fib(10)
+        "#),
+        ("large", &generate_large_source(1000)),
+    ];
 
-    c.bench_function("lexer/arithmetic", |b| {
-        b.iter(|| {
-            let mut lexer = Lexer::new(black_box(ARITHMETIC_HEAVY));
-            while let Ok(token) = lexer.next_token() {
-                if token.kind == vector::lexer::TokenKind::Eof {
-                    break;
-                }
-                black_box(token);
-            }
-        })
-    });
-}
-
-fn bench_parser(c: &mut Criterion) {
-    c.bench_function("parser/simple", |b| {
-        b.iter(|| {
-            let lexer = Lexer::new(black_box(SIMPLE_PROGRAM));
-            let mut parser = Parser::new(lexer);
-            black_box(parser.parse())
-        })
-    });
-
-    c.bench_function("parser/arithmetic", |b| {
-        b.iter(|| {
-            let lexer = Lexer::new(black_box(ARITHMETIC_HEAVY));
-            let mut parser = Parser::new(lexer);
-            black_box(parser.parse())
-        })
-    });
-
-    c.bench_function("parser/functions", |b| {
-        b.iter(|| {
-            let lexer = Lexer::new(black_box(FUNCTION_CALLS));
-            let mut parser = Parser::new(lexer);
-            black_box(parser.parse())
-        })
-    });
-}
-
-fn bench_compiler(c: &mut Criterion) {
-    let simple_ast = parse(SIMPLE_PROGRAM);
-    let arithmetic_ast = parse(ARITHMETIC_HEAVY);
-    let functions_ast = parse(FUNCTION_CALLS);
-
-    c.bench_function("compiler/simple", |b| {
-        b.iter(|| {
-            let mut compiler = Compiler::new();
-            black_box(compiler.compile(black_box(&simple_ast)))
-        })
-    });
-
-    c.bench_function("compiler/arithmetic", |b| {
-        b.iter(|| {
-            let mut compiler = Compiler::new();
-            black_box(compiler.compile(black_box(&arithmetic_ast)))
-        })
-    });
-
-    c.bench_function("compiler/functions", |b| {
-        b.iter(|| {
-            let mut compiler = Compiler::new();
-            black_box(compiler.compile(black_box(&functions_ast)))
-        })
-    });
-}
-
-fn bench_vm_execution(c: &mut Criterion) {
-    let arithmetic_module = compile(ARITHMETIC_HEAVY);
-    let function_module = compile(FUNCTION_CALLS);
-    let fib_module = compile(FIB_RECURSIVE);
-
-    c.bench_function("vm/arithmetic_loop", |b| {
-        b.iter(|| {
-            let mut vm = VM::new_without_jit();
-            black_box(vm.run(black_box(arithmetic_module.clone())))
-        })
-    });
-
-    c.bench_function("vm/function_calls", |b| {
-        b.iter(|| {
-            let mut vm = VM::new_without_jit();
-            black_box(vm.run(black_box(function_module.clone())))
-        })
-    });
-
-    c.bench_function("vm/fib_15_recursive", |b| {
-        b.iter(|| {
-            let mut vm = VM::new_without_jit();
-            black_box(vm.run(black_box(fib_module.clone())))
-        })
-    });
-}
-
-fn bench_end_to_end(c: &mut Criterion) {
-    c.bench_function("e2e/arithmetic_loop", |b| {
-        b.iter(|| {
-            let module = compile(black_box(ARITHMETIC_HEAVY));
-            let mut vm = VM::new_without_jit();
-            black_box(vm.run(module))
-        })
-    });
-
-    c.bench_function("e2e/fib_15", |b| {
-        b.iter(|| {
-            let module = compile(black_box(FIB_RECURSIVE));
-            let mut vm = VM::new_without_jit();
-            black_box(vm.run(module))
-        })
-    });
-}
-
-fn bench_fib_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fib_scaling");
-    
-    for n in [5, 10, 15, 20] {
-        let code = format!(r#"
-fn fib(n) {{
-    if n < 2 {{
-        return n
-    }}
-    return fib(n - 1) + fib(n - 2)
-}}
-fib({})
-"#, n);
-        
-        let module = compile(&code);
-        
-        group.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+    let mut group = c.benchmark_group("compile");
+    for (name, source) in sources {
+        group.bench_with_input(BenchmarkId::new("bytecode", name), source, |b, src| {
             b.iter(|| {
-                let mut vm = VM::new_without_jit();
-                black_box(vm.run(black_box(module.clone())))
-            })
+                let lexer = Lexer::new(src);
+                let mut parser = Parser::new(lexer);
+                let stmts = parser.parse().unwrap();
+                let mut compiler = Compiler::new();
+                let module = compiler.compile(&stmts).unwrap();
+                black_box(module)
+            });
         });
     }
-    
     group.finish();
+}
+
+/// Benchmark interpreter speed
+fn bench_interpreter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("interpreter");
+    
+    // Simple arithmetic
+    group.bench_function("arithmetic_simple", |b| {
+        let mut vector = Vector::new_without_jit();
+        b.iter(|| {
+            let result = vector.eval("1 + 2 * 3 - 4 / 2").unwrap();
+            black_box(result)
+        });
+    });
+
+    // Loop
+    group.bench_function("loop_1000", |b| {
+        let mut vector = Vector::new_without_jit();
+        vector.eval("let sum = 0").unwrap();
+        b.iter(|| {
+            let result = vector.eval(r#"
+                let i = 0
+                while i < 1000 {
+                    i = i + 1
+                }
+                i
+            "#).unwrap();
+            black_box(result)
+        });
+    });
+
+    // Function calls
+    group.bench_function("function_calls", |b| {
+        let mut vector = Vector::new_without_jit();
+        vector.eval("fn add(a, b) { return a + b }").unwrap();
+        b.iter(|| {
+            let result = vector.eval(r#"
+                let sum = 0
+                let i = 0
+                while i < 100 {
+                    sum = add(sum, i)
+                    i = i + 1
+                }
+                sum
+            "#).unwrap();
+            black_box(result)
+        });
+    });
+
+    // Array operations
+    group.bench_function("array_ops", |b| {
+        let mut vector = Vector::new_without_jit();
+        b.iter(|| {
+            let result = vector.eval(r#"
+                let arr = []
+                let i = 0
+                while i < 100 {
+                    push(arr, i)
+                    i = i + 1
+                }
+                len(arr)
+            "#).unwrap();
+            black_box(result)
+        });
+    });
+
+    // Fibonacci (recursive)
+    group.bench_function("fib_20", |b| {
+        let mut vector = Vector::new_without_jit();
+        vector.eval(r#"
+            fn fib(n) {
+                if n < 2 {
+                    return n
+                }
+                return fib(n - 1) + fib(n - 2)
+            }
+        "#).unwrap();
+        b.iter(|| {
+            let result = vector.eval("fib(20)").unwrap();
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark JIT compilation and execution
+fn bench_jit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("jit");
+
+    // Hot loop (should trigger JIT)
+    group.bench_function("hot_loop", |b| {
+        let mut vector = Vector::new();
+        b.iter(|| {
+            let result = vector.eval(r#"
+                let sum = 0
+                let i = 0
+                while i < 10000 {
+                    sum = sum + i
+                    i = i + 1
+                }
+                sum
+            "#).unwrap();
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark GC
+fn bench_gc(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gc");
+
+    // Allocation stress
+    group.bench_function("alloc_stress", |b| {
+        let mut vector = Vector::new_without_jit();
+        b.iter(|| {
+            let result = vector.eval(r#"
+                let arrays = []
+                let i = 0
+                while i < 100 {
+                    push(arrays, [1, 2, 3, 4, 5])
+                    i = i + 1
+                }
+                len(arrays)
+            "#).unwrap();
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark lexer
+fn bench_lexer(c: &mut Criterion) {
+    let source = generate_large_source(1000);
+    
+    c.bench_function("lexer_1000_lines", |b| {
+        b.iter(|| {
+            let lexer = Lexer::new(&source);
+            let tokens: Vec<_> = lexer.collect();
+            black_box(tokens)
+        });
+    });
+}
+
+/// Benchmark parser
+fn bench_parser(c: &mut Criterion) {
+    let source = generate_large_source(1000);
+    
+    c.bench_function("parser_1000_lines", |b| {
+        b.iter(|| {
+            let lexer = Lexer::new(&source);
+            let mut parser = Parser::new(lexer);
+            let stmts = parser.parse().unwrap();
+            black_box(stmts)
+        });
+    });
+}
+
+/// Benchmark string interning
+fn bench_intern(c: &mut Criterion) {
+    use vector::runtime::StringInterner;
+    
+    let mut group = c.benchmark_group("intern");
+    
+    group.bench_function("intern_new", |b| {
+        let mut interner = StringInterner::new();
+        let mut i = 0;
+        b.iter(|| {
+            let s = format!("string_{}", i);
+            i += 1;
+            let interned = interner.intern(&s);
+            black_box(interned)
+        });
+    });
+
+    group.bench_function("intern_cached", |b| {
+        let mut interner = StringInterner::new();
+        let _ = interner.intern("cached_string");
+        b.iter(|| {
+            let interned = interner.intern("cached_string");
+            black_box(interned)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark inline cache
+fn bench_inline_cache(c: &mut Criterion) {
+    use vector::jit::{InlineCacheManager, AccessSite, ShapeId, PropertySlot};
+    
+    let mut group = c.benchmark_group("inline_cache");
+    
+    group.bench_function("lookup_hit", |b| {
+        let mut icm = InlineCacheManager::new();
+        let site = AccessSite::new(0, "property");
+        let shape = icm.new_shape_id();
+        let slot = PropertySlot { offset: 0, is_own: true };
+        icm.record(site, shape, slot);
+        
+        b.iter(|| {
+            let result = icm.lookup(site, shape);
+            black_box(result)
+        });
+    });
+
+    group.bench_function("lookup_miss", |b| {
+        let mut icm = InlineCacheManager::new();
+        let site = AccessSite::new(0, "property");
+        let shape = icm.new_shape_id();
+        
+        b.iter(|| {
+            let result = icm.lookup(site, shape);
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+/// Generate a large source file for benchmarking
+fn generate_large_source(lines: usize) -> String {
+    let mut source = String::with_capacity(lines * 50);
+    
+    for i in 0..lines {
+        source.push_str(&format!("let x_{} = {} + {} * {}\n", i, i, i + 1, i + 2));
+    }
+    
+    source.push_str("x_0");
+    source
 }
 
 criterion_group!(
     benches,
+    bench_startup,
+    bench_compile,
+    bench_interpreter,
+    bench_jit,
+    bench_gc,
     bench_lexer,
     bench_parser,
-    bench_compiler,
-    bench_vm_execution,
-    bench_end_to_end,
-    bench_fib_scaling,
+    bench_intern,
+    bench_inline_cache,
 );
+
 criterion_main!(benches);

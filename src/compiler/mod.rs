@@ -176,12 +176,19 @@ impl Compiler {
     }
 
     pub(crate) fn add_function(&mut self, func: Function) -> Result<u16, CompileError> {
-        self.functions.push(func);
-        let idx = self.functions.len() - 1;
-        if idx > u16::MAX as usize {
-            return Err(CompileError::TooManyConstants);
+        // Add to root compiler's functions vector
+        if let Some(enclosing_ptr) = self.enclosing {
+            // Safety: enclosing pointer is valid during compilation
+            let enclosing = unsafe { &mut *enclosing_ptr };
+            enclosing.add_function(func)
+        } else {
+            self.functions.push(func);
+            let idx = self.functions.len() - 1;
+            if idx > u16::MAX as usize {
+                return Err(CompileError::TooManyConstants);
+            }
+            Ok(idx as u16)
         }
-        Ok(idx as u16)
     }
 
     // === Scope management ===

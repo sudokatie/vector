@@ -52,6 +52,9 @@ pub enum RuntimeError {
     NotImplemented(String),
 }
 
+use std::cell::RefCell;
+use value::{Closure, Upvalue};
+
 /// The Vector virtual machine
 pub struct VM {
     frames: Vec<CallFrame>,
@@ -63,6 +66,10 @@ pub struct VM {
     jit_enabled: bool,
     /// Garbage collector
     gc: GC,
+    /// Current closure's upvalues (for the currently executing closure)
+    current_upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    /// Open upvalues that haven't been closed yet
+    open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
 }
 
 impl VM {
@@ -74,6 +81,8 @@ impl VM {
             jit: Some(Jit::new()),
             jit_enabled: true,
             gc: GC::new(),
+            current_upvalues: Vec::new(),
+            open_upvalues: Vec::new(),
         };
         vm.register_stdlib();
         vm
@@ -88,6 +97,8 @@ impl VM {
             jit: None,
             jit_enabled: false,
             gc: GC::new(),
+            current_upvalues: Vec::new(),
+            open_upvalues: Vec::new(),
         };
         vm.register_stdlib();
         vm
@@ -102,6 +113,8 @@ impl VM {
             jit: Some(Jit::new()),
             jit_enabled: true,
             gc: GC::with_heap_size(heap_size),
+            current_upvalues: Vec::new(),
+            open_upvalues: Vec::new(),
         };
         vm.register_stdlib();
         vm
@@ -153,224 +166,87 @@ impl VM {
     }
 
     fn register_stdlib(&mut self) {
+        use crate::runtime::stdlib;
+        
         // === Core ===
-
-        // Print function
-        self.globals.insert("print".to_string(), Value::NativeFunction(|args| {
-            for (i, arg) in args.iter().enumerate() {
-                if i > 0 {
-                    print!(" ");
-                }
-                print!("{}", arg);
-            }
-            println!();
-            Ok(Value::Nil)
-        }));
-
-        // Type function
-        self.globals.insert("type".to_string(), Value::NativeFunction(|args| {
-            if args.is_empty() {
-                return Ok(Value::String("nil".to_string()));
-            }
-            Ok(Value::String(args[0].type_name().to_string()))
-        }));
-
-        // Len function
-        self.globals.insert("len".to_string(), Value::NativeFunction(|args| {
-            if args.is_empty() {
-                return Ok(Value::Int(0));
-            }
-            match &args[0] {
-                Value::String(s) => Ok(Value::Int(s.len() as i64)),
-                Value::Array(a) => Ok(Value::Int(a.borrow().len() as i64)),
-                Value::Table(t) => Ok(Value::Int(t.borrow().len() as i64)),
-                v => Err(RuntimeError::TypeError {
-                    expected: "string, array, or table".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-            }
-        }));
-
-        // Assert function
-        self.globals.insert("assert".to_string(), Value::NativeFunction(|args| {
-            if args.is_empty() || !args[0].is_truthy() {
-                let msg = args.get(1)
-                    .map(|v| format!("{}", v))
-                    .unwrap_or_else(|| "assertion failed".to_string());
-                panic!("{}", msg);
-            }
-            Ok(Value::Nil)
-        }));
-
-        // Error function
-        self.globals.insert("error".to_string(), Value::NativeFunction(|args| {
-            let msg = args.first()
-                .map(|v| format!("{}", v))
-                .unwrap_or_else(|| "error".to_string());
-            panic!("{}", msg);
-        }));
-
+        self.globals.insert("print".to_string(), Value::NativeFunction(stdlib::print_fn));
+        self.globals.insert("type".to_string(), Value::NativeFunction(stdlib::type_fn));
+        self.globals.insert("len".to_string(), Value::NativeFunction(stdlib::len_fn));
+        self.globals.insert("assert".to_string(), Value::NativeFunction(stdlib::assert_fn));
+        self.globals.insert("error".to_string(), Value::NativeFunction(stdlib::error_fn));
+        self.globals.insert("str".to_string(), Value::NativeFunction(stdlib::str_fn));
+        
         // === String functions ===
-
-        self.globals.insert("str".to_string(), Value::NativeFunction(|args| {
-            if args.is_empty() {
-                return Ok(Value::String(String::new()));
-            }
-            Ok(Value::String(format!("{}", args[0])))
-        }));
-
-        self.globals.insert("upper".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::String(s)) => Ok(Value::String(s.to_uppercase())),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "string".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::String(String::new())),
-            }
-        }));
-
-        self.globals.insert("lower".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::String(s)) => Ok(Value::String(s.to_lowercase())),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "string".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::String(String::new())),
-            }
-        }));
-
-        self.globals.insert("trim".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::String(s)) => Ok(Value::String(s.trim().to_string())),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "string".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::String(String::new())),
-            }
-        }));
-
+        self.globals.insert("upper".to_string(), Value::NativeFunction(stdlib::upper_fn));
+        self.globals.insert("lower".to_string(), Value::NativeFunction(stdlib::lower_fn));
+        self.globals.insert("trim".to_string(), Value::NativeFunction(stdlib::trim_fn));
+        self.globals.insert("split".to_string(), Value::NativeFunction(stdlib::split_fn));
+        self.globals.insert("contains".to_string(), Value::NativeFunction(stdlib::contains_fn));
+        self.globals.insert("replace".to_string(), Value::NativeFunction(stdlib::replace_fn));
+        
         // === Math functions ===
-
-        self.globals.insert("abs".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
-                Some(Value::Float(n)) => Ok(Value::Float(n.abs())),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "number".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::Int(0)),
-            }
-        }));
-
-        self.globals.insert("floor".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::Int(n)) => Ok(Value::Int(*n)),
-                Some(Value::Float(n)) => Ok(Value::Int(n.floor() as i64)),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "number".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::Int(0)),
-            }
-        }));
-
-        self.globals.insert("ceil".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::Int(n)) => Ok(Value::Int(*n)),
-                Some(Value::Float(n)) => Ok(Value::Int(n.ceil() as i64)),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "number".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::Int(0)),
-            }
-        }));
-
-        self.globals.insert("sqrt".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::Int(n)) => Ok(Value::Float((*n as f64).sqrt())),
-                Some(Value::Float(n)) => Ok(Value::Float(n.sqrt())),
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "number".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::Float(0.0)),
-            }
-        }));
-
-        self.globals.insert("min".to_string(), Value::NativeFunction(|args| {
-            if args.is_empty() {
-                return Ok(Value::Nil);
-            }
-            let mut min = args[0].clone();
-            for arg in args.iter().skip(1) {
-                match (&min, arg) {
-                    (Value::Int(a), Value::Int(b)) if b < a => min = arg.clone(),
-                    (Value::Float(a), Value::Float(b)) if b < a => min = arg.clone(),
-                    (Value::Int(a), Value::Float(b)) if *b < *a as f64 => min = arg.clone(),
-                    (Value::Float(a), Value::Int(b)) if (*b as f64) < *a => min = arg.clone(),
-                    _ => {}
-                }
-            }
-            Ok(min)
-        }));
-
-        self.globals.insert("max".to_string(), Value::NativeFunction(|args| {
-            if args.is_empty() {
-                return Ok(Value::Nil);
-            }
-            let mut max = args[0].clone();
-            for arg in args.iter().skip(1) {
-                match (&max, arg) {
-                    (Value::Int(a), Value::Int(b)) if b > a => max = arg.clone(),
-                    (Value::Float(a), Value::Float(b)) if b > a => max = arg.clone(),
-                    (Value::Int(a), Value::Float(b)) if *b > *a as f64 => max = arg.clone(),
-                    (Value::Float(a), Value::Int(b)) if (*b as f64) > *a => max = arg.clone(),
-                    _ => {}
-                }
-            }
-            Ok(max)
-        }));
-
+        self.globals.insert("abs".to_string(), Value::NativeFunction(stdlib::abs_fn));
+        self.globals.insert("floor".to_string(), Value::NativeFunction(stdlib::floor_fn));
+        self.globals.insert("ceil".to_string(), Value::NativeFunction(stdlib::ceil_fn));
+        self.globals.insert("sqrt".to_string(), Value::NativeFunction(stdlib::sqrt_fn));
+        self.globals.insert("pow".to_string(), Value::NativeFunction(stdlib::pow_fn));
+        self.globals.insert("sin".to_string(), Value::NativeFunction(stdlib::sin_fn));
+        self.globals.insert("cos".to_string(), Value::NativeFunction(stdlib::cos_fn));
+        self.globals.insert("tan".to_string(), Value::NativeFunction(stdlib::tan_fn));
+        self.globals.insert("min".to_string(), Value::NativeFunction(stdlib::min_fn));
+        self.globals.insert("max".to_string(), Value::NativeFunction(stdlib::max_fn));
+        self.globals.insert("random".to_string(), Value::NativeFunction(stdlib::random_fn));
+        self.globals.insert("random_int".to_string(), Value::NativeFunction(stdlib::random_int_fn));
+        
         // === Array functions ===
-
-        self.globals.insert("push".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::Array(arr)) => {
-                    let mut arr = arr.borrow_mut();
-                    for arg in args.iter().skip(1) {
-                        arr.push(arg.clone());
-                    }
-                    Ok(Value::Int(arr.len() as i64))
-                }
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "array".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Err(RuntimeError::TypeError {
-                    expected: "array".to_string(),
-                    got: "nil".to_string(),
-                }),
-            }
-        }));
-
-        self.globals.insert("pop".to_string(), Value::NativeFunction(|args| {
-            match args.first() {
-                Some(Value::Array(arr)) => {
-                    let mut arr = arr.borrow_mut();
-                    Ok(arr.pop().unwrap_or(Value::Nil))
-                }
-                Some(v) => Err(RuntimeError::TypeError {
-                    expected: "array".to_string(),
-                    got: v.type_name().to_string(),
-                }),
-                None => Ok(Value::Nil),
-            }
-        }));
+        self.globals.insert("push".to_string(), Value::NativeFunction(stdlib::push_fn));
+        self.globals.insert("pop".to_string(), Value::NativeFunction(stdlib::pop_fn));
+        self.globals.insert("insert".to_string(), Value::NativeFunction(stdlib::insert_fn));
+        self.globals.insert("remove".to_string(), Value::NativeFunction(stdlib::remove_fn));
+        self.globals.insert("sort".to_string(), Value::NativeFunction(stdlib::sort_fn));
+        self.globals.insert("reverse".to_string(), Value::NativeFunction(stdlib::reverse_fn));
+        
+        // === Higher-order array functions (need VM access) ===
+        self.globals.insert("map".to_string(), Value::BuiltinHOF(value::BuiltinHOF::Map));
+        self.globals.insert("filter".to_string(), Value::BuiltinHOF(value::BuiltinHOF::Filter));
+        self.globals.insert("reduce".to_string(), Value::BuiltinHOF(value::BuiltinHOF::Reduce));
+        
+        // === Table functions ===
+        self.globals.insert("keys".to_string(), Value::NativeFunction(stdlib::keys_fn));
+        self.globals.insert("values".to_string(), Value::NativeFunction(stdlib::values_fn));
+        self.globals.insert("has_key".to_string(), Value::NativeFunction(stdlib::table_contains_fn));
+        self.globals.insert("table_remove".to_string(), Value::NativeFunction(stdlib::table_remove_fn));
+        
+        // === Namespaced modules ===
+        // math module
+        let mut math = fnv::FnvHashMap::default();
+        math.insert(Value::String("abs".to_string()), Value::NativeFunction(stdlib::abs_fn));
+        math.insert(Value::String("floor".to_string()), Value::NativeFunction(stdlib::floor_fn));
+        math.insert(Value::String("ceil".to_string()), Value::NativeFunction(stdlib::ceil_fn));
+        math.insert(Value::String("sqrt".to_string()), Value::NativeFunction(stdlib::sqrt_fn));
+        math.insert(Value::String("pow".to_string()), Value::NativeFunction(stdlib::pow_fn));
+        math.insert(Value::String("sin".to_string()), Value::NativeFunction(stdlib::sin_fn));
+        math.insert(Value::String("cos".to_string()), Value::NativeFunction(stdlib::cos_fn));
+        math.insert(Value::String("tan".to_string()), Value::NativeFunction(stdlib::tan_fn));
+        math.insert(Value::String("min".to_string()), Value::NativeFunction(stdlib::min_fn));
+        math.insert(Value::String("max".to_string()), Value::NativeFunction(stdlib::max_fn));
+        math.insert(Value::String("random".to_string()), Value::NativeFunction(stdlib::random_fn));
+        math.insert(Value::String("random_int".to_string()), Value::NativeFunction(stdlib::random_int_fn));
+        self.globals.insert("math".to_string(), Value::Table(Rc::new(RefCell::new(math))));
+        
+        // io module
+        let mut io = fnv::FnvHashMap::default();
+        io.insert(Value::String("read_file".to_string()), Value::NativeFunction(stdlib::read_file_fn));
+        io.insert(Value::String("write_file".to_string()), Value::NativeFunction(stdlib::write_file_fn));
+        io.insert(Value::String("read_line".to_string()), Value::NativeFunction(stdlib::read_line_fn));
+        io.insert(Value::String("input".to_string()), Value::NativeFunction(stdlib::input_fn));
+        self.globals.insert("io".to_string(), Value::Table(Rc::new(RefCell::new(io))));
+        
+        // === IO functions ===
+        self.globals.insert("read_file".to_string(), Value::NativeFunction(stdlib::read_file_fn));
+        self.globals.insert("write_file".to_string(), Value::NativeFunction(stdlib::write_file_fn));
+        self.globals.insert("read_line".to_string(), Value::NativeFunction(stdlib::read_line_fn));
+        self.globals.insert("input".to_string(), Value::NativeFunction(stdlib::input_fn));
     }
 }
 

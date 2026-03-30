@@ -1,11 +1,12 @@
 //! Bytecode execution engine
 
 use super::{VM, RuntimeError};
-use super::value::Value;
+use super::value::{Value, Closure, Upvalue, BuiltinHOF};
 use super::frame::CallFrame;
 use crate::compiler::{OpCode, Module};
 use crate::jit::TypeTag;
 use std::rc::Rc;
+use std::cell::RefCell;
 
 impl VM {
     /// Run a compiled module
@@ -53,12 +54,18 @@ impl VM {
             Value::String(_) => TypeTag::String,
             Value::Array(_) => TypeTag::Array,
             Value::Table(_) => TypeTag::Table,
-            Value::Function(_) | Value::NativeFunction(_) => TypeTag::Function,
+            Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) | Value::BuiltinHOF(_) => TypeTag::Function,
+            Value::Userdata(_) | Value::Range(_) | Value::Iterator(_) => TypeTag::Other,
         }
     }
 
     /// Main execution loop
     fn execute(&mut self) -> Result<Value, RuntimeError> {
+        self.execute_until(0)
+    }
+    
+    /// Execute until frame depth drops to target_depth
+    fn execute_until(&mut self, target_depth: usize) -> Result<Value, RuntimeError> {
         loop {
             let op = self.read_opcode()?;
 
@@ -95,6 +102,13 @@ impl VM {
                     let dst = self.read_byte()?;
                     let src = self.read_byte()?;
                     let value = self.get_register(src).clone();
+                    self.set_register(dst, value);
+                }
+
+                OpCode::Copy => {
+                    let dst = self.read_byte()?;
+                    let src = self.read_byte()?;
+                    let value = self.get_register(src).deep_copy();
                     self.set_register(dst, value);
                 }
 
@@ -343,6 +357,31 @@ impl VM {
 
                             self.frames.push(new_frame);
                         }
+                        Value::Closure(closure) => {
+                            // Profile the call
+                            self.profile_call(closure.func_idx as usize);
+
+                            let func = self.functions[closure.func_idx as usize].clone();
+                            if func.arity != argc {
+                                return Err(RuntimeError::ArityMismatch {
+                                    expected: func.arity,
+                                    got: argc,
+                                });
+                            }
+
+                            // Copy arguments to new frame
+                            let mut new_frame = CallFrame::new_with_return(func, self.frames.len(), dst);
+
+                            for i in 0..argc {
+                                let arg = self.get_register(dst + 1 + i).clone();
+                                new_frame.set_register(i, arg);
+                            }
+
+                            // Store closure's upvalues for this frame
+                            self.current_upvalues = closure.upvalues.clone();
+
+                            self.frames.push(new_frame);
+                        }
                         Value::NativeFunction(native_fn) => {
                             let mut args = Vec::with_capacity(argc as usize);
                             for i in 0..argc {
@@ -351,7 +390,125 @@ impl VM {
                             let result = native_fn(&args)?;
                             self.set_register(dst, result);
                         }
+                        Value::BuiltinHOF(hof) => {
+                            let result = self.call_builtin_hof(hof, dst, argc)?;
+                            self.set_register(dst, result);
+                        }
                         _ => return Err(RuntimeError::NotCallable(callee.type_name().to_string())),
+                    }
+                }
+
+                OpCode::MethodCall => {
+                    let dst = self.read_byte()?;
+                    let obj_reg = self.read_byte()?;
+                    let method_reg = self.read_byte()?;
+                    let argc = self.read_byte()?;
+
+                    let obj = self.get_register(obj_reg).clone();
+                    let method_name = self.get_register(method_reg).clone();
+                    
+                    let method_str = match &method_name {
+                        Value::String(s) => s.clone(),
+                        _ => return Err(RuntimeError::TypeError {
+                            expected: "string".to_string(),
+                            got: method_name.type_name().to_string(),
+                        }),
+                    };
+
+                    // Check if object is a table containing the method
+                    let callee = if let Value::Table(tbl) = &obj {
+                        if let Some(func) = tbl.borrow().get(&method_name) {
+                            Some(func.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(func) = callee {
+                        // Call method from table: table.method(args)
+                        let mut args = Vec::with_capacity(argc as usize);
+                        for i in 0..argc {
+                            args.push(self.get_register(dst + 2 + i).clone());
+                        }
+                        
+                        match func {
+                            Value::NativeFunction(native_fn) => {
+                                let result = native_fn(&args)?;
+                                self.set_register(dst, result);
+                            }
+                            Value::Function(func_idx) => {
+                                let f = self.functions[func_idx as usize].clone();
+                                let mut new_frame = CallFrame::new_with_return(f, self.frames.len(), dst);
+                                for (i, arg) in args.iter().enumerate() {
+                                    new_frame.set_register(i as u8, arg.clone());
+                                }
+                                self.frames.push(new_frame);
+                            }
+                            Value::Closure(closure) => {
+                                let f = self.functions[closure.func_idx as usize].clone();
+                                let mut new_frame = CallFrame::new_with_return(f, self.frames.len(), dst);
+                                for (i, arg) in args.iter().enumerate() {
+                                    new_frame.set_register(i as u8, arg.clone());
+                                }
+                                self.current_upvalues = closure.upvalues.clone();
+                                self.frames.push(new_frame);
+                            }
+                            _ => return Err(RuntimeError::NotCallable(func.type_name().to_string())),
+                        }
+                    } else {
+                        // Look up global function and call with obj as first arg: method(obj, args)
+                        let global_func = self.globals.get(&method_str).cloned();
+                        
+                        if let Some(func) = global_func {
+                            // Collect args: obj + remaining args
+                            let mut args = Vec::with_capacity(argc as usize + 1);
+                            args.push(obj);
+                            for i in 0..argc {
+                                args.push(self.get_register(dst + 2 + i).clone());
+                            }
+                            
+                            match func {
+                                Value::NativeFunction(native_fn) => {
+                                    let result = native_fn(&args)?;
+                                    self.set_register(dst, result);
+                                }
+                                Value::BuiltinHOF(hof) => {
+                                    // For HOFs, we need to set up args differently
+                                    // args[0] is the array, args[1] is the function
+                                    self.set_register(dst + 1, args[0].clone());
+                                    if args.len() > 1 {
+                                        self.set_register(dst + 2, args[1].clone());
+                                    }
+                                    if args.len() > 2 {
+                                        self.set_register(dst + 3, args[2].clone());
+                                    }
+                                    let result = self.call_builtin_hof(hof, dst, (args.len()) as u8)?;
+                                    self.set_register(dst, result);
+                                }
+                                Value::Function(func_idx) => {
+                                    let f = self.functions[func_idx as usize].clone();
+                                    let mut new_frame = CallFrame::new_with_return(f, self.frames.len(), dst);
+                                    for (i, arg) in args.iter().enumerate() {
+                                        new_frame.set_register(i as u8, arg.clone());
+                                    }
+                                    self.frames.push(new_frame);
+                                }
+                                Value::Closure(closure) => {
+                                    let f = self.functions[closure.func_idx as usize].clone();
+                                    let mut new_frame = CallFrame::new_with_return(f, self.frames.len(), dst);
+                                    for (i, arg) in args.iter().enumerate() {
+                                        new_frame.set_register(i as u8, arg.clone());
+                                    }
+                                    self.current_upvalues = closure.upvalues.clone();
+                                    self.frames.push(new_frame);
+                                }
+                                _ => return Err(RuntimeError::NotCallable(func.type_name().to_string())),
+                            }
+                        } else {
+                            return Err(RuntimeError::UndefinedVariable(method_str));
+                        }
                     }
                 }
 
@@ -360,11 +517,14 @@ impl VM {
                     let src = self.read_byte()?;
                     let result = self.get_register(src).clone();
 
+                    // Close all open upvalues in this frame
+                    self.close_upvalues_for_frame();
+
                     // Get return register before popping
                     let return_reg = self.frame().return_register;
                     self.frames.pop();
 
-                    if self.frames.is_empty() {
+                    if self.frames.is_empty() || self.frames.len() < target_depth {
                         return Ok(result);
                     }
 
@@ -374,11 +534,14 @@ impl VM {
                 OpCode::ReturnNil => {
                     let _dst = self.read_byte()?;
 
+                    // Close all open upvalues in this frame
+                    self.close_upvalues_for_frame();
+
                     // Get return register before popping
                     let return_reg = self.frame().return_register;
                     self.frames.pop();
 
-                    if self.frames.is_empty() {
+                    if self.frames.is_empty() || self.frames.len() < target_depth {
                         return Ok(Value::Nil);
                     }
 
@@ -463,21 +626,51 @@ impl VM {
                     let arr = self.read_byte()?;
                     let idx = self.read_byte()?;
 
-                    let array = self.get_register(arr).clone();
+                    let container = self.get_register(arr).clone();
                     let index = self.get_register(idx).clone();
 
-                    match (&array, &index) {
-                        (Value::Array(arr), Value::Int(i)) => {
-                            let arr = arr.borrow();
-                            let idx = *i as usize;
-                            if idx >= arr.len() {
-                                return Err(RuntimeError::IndexOutOfBounds(*i));
+                    match &container {
+                        Value::Array(arr) => {
+                            match &index {
+                                Value::Int(i) => {
+                                    let arr = arr.borrow();
+                                    let idx = *i as usize;
+                                    if idx >= arr.len() {
+                                        return Err(RuntimeError::IndexOutOfBounds(*i));
+                                    }
+                                    self.set_register(dst, arr[idx].clone());
+                                }
+                                _ => return Err(RuntimeError::TypeError {
+                                    expected: "int".to_string(),
+                                    got: index.type_name().to_string(),
+                                }),
                             }
-                            self.set_register(dst, arr[idx].clone());
+                        }
+                        Value::Table(tbl) => {
+                            let tbl = tbl.borrow();
+                            let value = tbl.get(&index).cloned().unwrap_or(Value::Nil);
+                            self.set_register(dst, value);
+                        }
+                        Value::String(s) => {
+                            // String indexing returns character at position
+                            match &index {
+                                Value::Int(i) => {
+                                    let idx = *i as usize;
+                                    if idx >= s.len() {
+                                        return Err(RuntimeError::IndexOutOfBounds(*i));
+                                    }
+                                    let ch = s.chars().nth(idx).map(|c| c.to_string()).unwrap_or_default();
+                                    self.set_register(dst, Value::String(ch));
+                                }
+                                _ => return Err(RuntimeError::TypeError {
+                                    expected: "int".to_string(),
+                                    got: index.type_name().to_string(),
+                                }),
+                            }
                         }
                         _ => return Err(RuntimeError::TypeError {
-                            expected: "array[int]".to_string(),
-                            got: format!("{}[{}]", array.type_name(), index.type_name()),
+                            expected: "array, table, or string".to_string(),
+                            got: container.type_name().to_string(),
                         }),
                     }
                 }
@@ -487,22 +680,34 @@ impl VM {
                     let idx = self.read_byte()?;
                     let val = self.read_byte()?;
 
-                    let array = self.get_register(arr).clone();
+                    let container = self.get_register(arr).clone();
                     let index = self.get_register(idx).clone();
                     let value = self.get_register(val).clone();
 
-                    match (&array, &index) {
-                        (Value::Array(arr), Value::Int(i)) => {
-                            let mut arr = arr.borrow_mut();
-                            let idx = *i as usize;
-                            if idx >= arr.len() {
-                                return Err(RuntimeError::IndexOutOfBounds(*i));
+                    match &container {
+                        Value::Array(arr) => {
+                            match &index {
+                                Value::Int(i) => {
+                                    let mut arr = arr.borrow_mut();
+                                    let idx = *i as usize;
+                                    if idx >= arr.len() {
+                                        return Err(RuntimeError::IndexOutOfBounds(*i));
+                                    }
+                                    arr[idx] = value;
+                                }
+                                _ => return Err(RuntimeError::TypeError {
+                                    expected: "int".to_string(),
+                                    got: index.type_name().to_string(),
+                                }),
                             }
-                            arr[idx] = value;
+                        }
+                        Value::Table(tbl) => {
+                            let mut tbl = tbl.borrow_mut();
+                            tbl.insert(index, value);
                         }
                         _ => return Err(RuntimeError::TypeError {
-                            expected: "array[int]".to_string(),
-                            got: format!("{}[{}]", array.type_name(), index.type_name()),
+                            expected: "array or table".to_string(),
+                            got: container.type_name().to_string(),
                         }),
                     }
                 }
@@ -559,24 +764,446 @@ impl VM {
                 OpCode::Closure => {
                     let dst = self.read_byte()?;
                     let func_idx = self.read_u16()?;
-                    self.set_register(dst, Value::Function(func_idx));
+                    let num_upvalues = self.read_byte()?;
+                    
+                    let mut upvalues = Vec::with_capacity(num_upvalues as usize);
+                    
+                    for _ in 0..num_upvalues {
+                        let is_local = self.read_byte()? != 0;
+                        let index = self.read_byte()?;
+                        
+                        let upvalue = if is_local {
+                            // Capture a local from the current frame
+                            let frame_idx = self.frames.len() - 1;
+                            
+                            // Check if we already have an open upvalue for this
+                            let existing = self.open_upvalues.iter().find(|uv| {
+                                match &*uv.borrow() {
+                                    Upvalue::Open { frame_idx: f, register: r } => {
+                                        *f == frame_idx && *r == index
+                                    }
+                                    _ => false,
+                                }
+                            });
+                            
+                            if let Some(uv) = existing {
+                                Rc::clone(uv)
+                            } else {
+                                let uv = Rc::new(RefCell::new(Upvalue::Open {
+                                    frame_idx,
+                                    register: index,
+                                }));
+                                self.open_upvalues.push(Rc::clone(&uv));
+                                uv
+                            }
+                        } else {
+                            // Capture from enclosing closure's upvalues
+                            if index as usize >= self.current_upvalues.len() {
+                                return Err(RuntimeError::InvalidConstant(index as u16));
+                            }
+                            Rc::clone(&self.current_upvalues[index as usize])
+                        };
+                        
+                        upvalues.push(upvalue);
+                    }
+                    
+                    let closure = Closure { func_idx, upvalues };
+                    self.set_register(dst, Value::Closure(Rc::new(closure)));
                 }
 
-                OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue => {
-                    // TODO: Implement upvalues
-                    let _ = self.read_byte()?;
-                    let _ = self.read_byte()?;
+                OpCode::GetUpvalue => {
+                    let dst = self.read_byte()?;
+                    let idx = self.read_byte()?;
+                    
+                    if idx as usize >= self.current_upvalues.len() {
+                        return Err(RuntimeError::InvalidConstant(idx as u16));
+                    }
+                    
+                    let upvalue = &self.current_upvalues[idx as usize];
+                    let value = match &*upvalue.borrow() {
+                        Upvalue::Open { frame_idx, register } => {
+                            self.frames[*frame_idx].get_register(*register).clone()
+                        }
+                        Upvalue::Closed(val) => val.clone(),
+                    };
+                    self.set_register(dst, value);
                 }
 
-                OpCode::GetIter | OpCode::IterNext => {
-                    // TODO: Implement iteration
-                    return Err(RuntimeError::NotImplemented("iteration".to_string()));
+                OpCode::SetUpvalue => {
+                    let idx = self.read_byte()?;
+                    let src = self.read_byte()?;
+                    
+                    if idx as usize >= self.current_upvalues.len() {
+                        return Err(RuntimeError::InvalidConstant(idx as u16));
+                    }
+                    
+                    let value = self.get_register(src).clone();
+                    let upvalue = &self.current_upvalues[idx as usize];
+                    
+                    match &mut *upvalue.borrow_mut() {
+                        Upvalue::Open { frame_idx, register } => {
+                            self.frames[*frame_idx].set_register(*register, value);
+                        }
+                        Upvalue::Closed(val) => {
+                            *val = value;
+                        }
+                    }
+                }
+
+                OpCode::CloseUpvalue => {
+                    let slot = self.read_byte()?;
+                    let _ = self.read_byte()?; // padding
+                    
+                    let frame_idx = self.frames.len() - 1;
+                    
+                    // Close all upvalues that reference this slot in the current frame
+                    for uv in &self.open_upvalues {
+                        let should_close = {
+                            match &*uv.borrow() {
+                                Upvalue::Open { frame_idx: f, register: r } => {
+                                    *f == frame_idx && *r >= slot
+                                }
+                                _ => false,
+                            }
+                        };
+                        
+                        if should_close {
+                            let value = {
+                                match &*uv.borrow() {
+                                    Upvalue::Open { register, .. } => {
+                                        self.frame().get_register(*register).clone()
+                                    }
+                                    Upvalue::Closed(v) => v.clone(),
+                                }
+                            };
+                            *uv.borrow_mut() = Upvalue::Closed(value);
+                        }
+                    }
+                    
+                    // Remove closed upvalues from open list
+                    self.open_upvalues.retain(|uv| {
+                        matches!(&*uv.borrow(), Upvalue::Open { .. })
+                    });
+                }
+
+                OpCode::MakeRange => {
+                    let dst = self.read_byte()?;
+                    let start_reg = self.read_byte()?;
+                    let end_reg = self.read_byte()?;
+                    
+                    let start = match self.get_register(start_reg) {
+                        Value::Int(n) => *n,
+                        v => return Err(RuntimeError::TypeError {
+                            expected: "int".to_string(),
+                            got: v.type_name().to_string(),
+                        }),
+                    };
+                    let end = match self.get_register(end_reg) {
+                        Value::Int(n) => *n,
+                        v => return Err(RuntimeError::TypeError {
+                            expected: "int".to_string(),
+                            got: v.type_name().to_string(),
+                        }),
+                    };
+                    
+                    self.set_register(dst, Value::Range(crate::vm::value::Range {
+                        start,
+                        end,
+                        inclusive: false,
+                    }));
+                }
+
+                OpCode::MakeRangeIncl => {
+                    let dst = self.read_byte()?;
+                    let start_reg = self.read_byte()?;
+                    let end_reg = self.read_byte()?;
+                    
+                    let start = match self.get_register(start_reg) {
+                        Value::Int(n) => *n,
+                        v => return Err(RuntimeError::TypeError {
+                            expected: "int".to_string(),
+                            got: v.type_name().to_string(),
+                        }),
+                    };
+                    let end = match self.get_register(end_reg) {
+                        Value::Int(n) => *n,
+                        v => return Err(RuntimeError::TypeError {
+                            expected: "int".to_string(),
+                            got: v.type_name().to_string(),
+                        }),
+                    };
+                    
+                    self.set_register(dst, Value::Range(crate::vm::value::Range {
+                        start,
+                        end,
+                        inclusive: true,
+                    }));
+                }
+
+                OpCode::GetIter => {
+                    let dst = self.read_byte()?;
+                    let iterable_reg = self.read_byte()?;
+                    
+                    let iterable = self.get_register(iterable_reg).clone();
+                    let iter = match iterable {
+                        Value::Range(r) => {
+                            crate::vm::value::Iterator::Range {
+                                current: r.start,
+                                end: r.end,
+                                inclusive: r.inclusive,
+                            }
+                        }
+                        Value::Array(arr) => {
+                            crate::vm::value::Iterator::Array {
+                                array: arr,
+                                index: 0,
+                            }
+                        }
+                        Value::Table(tbl) => {
+                            let keys: Vec<Value> = tbl.borrow().keys().cloned().collect();
+                            crate::vm::value::Iterator::Table {
+                                keys,
+                                index: 0,
+                            }
+                        }
+                        v => return Err(RuntimeError::TypeError {
+                            expected: "iterable (range, array, or table)".to_string(),
+                            got: v.type_name().to_string(),
+                        }),
+                    };
+                    
+                    self.set_register(dst, Value::Iterator(std::rc::Rc::new(std::cell::RefCell::new(iter))));
+                }
+
+                OpCode::IterNext => {
+                    let dst_val = self.read_byte()?;
+                    let dst_done = self.read_byte()?;
+                    let iter_reg = self.read_byte()?;
+                    
+                    let iter_val = self.get_register(iter_reg).clone();
+                    let iter_rc = match &iter_val {
+                        Value::Iterator(it) => it.clone(),
+                        v => return Err(RuntimeError::TypeError {
+                            expected: "iterator".to_string(),
+                            got: v.type_name().to_string(),
+                        }),
+                    };
+                    
+                    let mut iter = iter_rc.borrow_mut();
+                    let next_val = match &mut *iter {
+                        crate::vm::value::Iterator::Range { current, end, inclusive } => {
+                            let done = if *inclusive {
+                                *current > *end
+                            } else {
+                                *current >= *end
+                            };
+                            if done {
+                                None
+                            } else {
+                                let val = *current;
+                                *current += 1;
+                                Some(Value::Int(val))
+                            }
+                        }
+                        crate::vm::value::Iterator::Array { array, index } => {
+                            let arr = array.borrow();
+                            if *index >= arr.len() {
+                                None
+                            } else {
+                                let val = arr[*index].clone();
+                                *index += 1;
+                                Some(val)
+                            }
+                        }
+                        crate::vm::value::Iterator::Table { keys, index } => {
+                            if *index >= keys.len() {
+                                None
+                            } else {
+                                let val = keys[*index].clone();
+                                *index += 1;
+                                Some(val)
+                            }
+                        }
+                    };
+                    
+                    match next_val {
+                        Some(val) => {
+                            self.set_register(dst_val, val);
+                            self.set_register(dst_done, Value::Bool(false));
+                        }
+                        None => {
+                            self.set_register(dst_val, Value::Nil);
+                            self.set_register(dst_done, Value::Bool(true));
+                        }
+                    }
                 }
             }
         }
     }
 
+    // === Built-in Higher-Order Functions ===
+
+    fn call_builtin_hof(&mut self, hof: BuiltinHOF, dst: u8, argc: u8) -> Result<Value, RuntimeError> {
+        match hof {
+            BuiltinHOF::Map => {
+                if argc < 2 {
+                    return Err(RuntimeError::ArityMismatch { expected: 2, got: argc });
+                }
+                let arr = self.get_register(dst + 1).clone();
+                let func = self.get_register(dst + 2).clone();
+                
+                let elements = match &arr {
+                    Value::Array(a) => a.borrow().clone(),
+                    _ => return Err(RuntimeError::TypeError {
+                        expected: "array".to_string(),
+                        got: arr.type_name().to_string(),
+                    }),
+                };
+                
+                let mut result = Vec::with_capacity(elements.len());
+                for elem in elements {
+                    let val = self.call_function_sync(&func, &[elem])?;
+                    result.push(val);
+                }
+                
+                Ok(Value::Array(Rc::new(RefCell::new(result))))
+            }
+            
+            BuiltinHOF::Filter => {
+                if argc < 2 {
+                    return Err(RuntimeError::ArityMismatch { expected: 2, got: argc });
+                }
+                let arr = self.get_register(dst + 1).clone();
+                let func = self.get_register(dst + 2).clone();
+                
+                let elements = match &arr {
+                    Value::Array(a) => a.borrow().clone(),
+                    _ => return Err(RuntimeError::TypeError {
+                        expected: "array".to_string(),
+                        got: arr.type_name().to_string(),
+                    }),
+                };
+                
+                let mut result = Vec::new();
+                for elem in elements {
+                    let keep = self.call_function_sync(&func, &[elem.clone()])?;
+                    if keep.is_truthy() {
+                        result.push(elem);
+                    }
+                }
+                
+                Ok(Value::Array(Rc::new(RefCell::new(result))))
+            }
+            
+            BuiltinHOF::Reduce => {
+                if argc < 3 {
+                    return Err(RuntimeError::ArityMismatch { expected: 3, got: argc });
+                }
+                let arr = self.get_register(dst + 1).clone();
+                let func = self.get_register(dst + 2).clone();
+                let init = self.get_register(dst + 3).clone();
+                
+                let elements = match &arr {
+                    Value::Array(a) => a.borrow().clone(),
+                    _ => return Err(RuntimeError::TypeError {
+                        expected: "array".to_string(),
+                        got: arr.type_name().to_string(),
+                    }),
+                };
+                
+                let mut acc = init;
+                for elem in elements {
+                    acc = self.call_function_sync(&func, &[acc, elem])?;
+                }
+                
+                Ok(acc)
+            }
+        }
+    }
+
+    /// Synchronously call a function and return its result
+    fn call_function_sync(&mut self, func: &Value, args: &[Value]) -> Result<Value, RuntimeError> {
+        let target_depth = self.frames.len() + 1;
+        
+        match func {
+            Value::Function(func_idx) => {
+                let f = self.functions[*func_idx as usize].clone();
+                if f.arity as usize != args.len() {
+                    return Err(RuntimeError::ArityMismatch {
+                        expected: f.arity,
+                        got: args.len() as u8,
+                    });
+                }
+                
+                let mut new_frame = CallFrame::new_with_return(f, self.frames.len(), 0);
+                for (i, arg) in args.iter().enumerate() {
+                    new_frame.set_register(i as u8, arg.clone());
+                }
+                self.frames.push(new_frame);
+                
+                self.execute_until(target_depth)
+            }
+            Value::Closure(closure) => {
+                let f = self.functions[closure.func_idx as usize].clone();
+                if f.arity as usize != args.len() {
+                    return Err(RuntimeError::ArityMismatch {
+                        expected: f.arity,
+                        got: args.len() as u8,
+                    });
+                }
+                
+                let mut new_frame = CallFrame::new_with_return(f, self.frames.len(), 0);
+                for (i, arg) in args.iter().enumerate() {
+                    new_frame.set_register(i as u8, arg.clone());
+                }
+                
+                let saved_upvalues = std::mem::take(&mut self.current_upvalues);
+                self.current_upvalues = closure.upvalues.clone();
+                self.frames.push(new_frame);
+                
+                let result = self.execute_until(target_depth)?;
+                self.current_upvalues = saved_upvalues;
+                Ok(result)
+            }
+            Value::NativeFunction(native_fn) => {
+                native_fn(args)
+            }
+            _ => Err(RuntimeError::NotCallable(func.type_name().to_string())),
+        }
+    }
+
     // === Helper methods ===
+
+    /// Close all open upvalues that reference the current frame
+    fn close_upvalues_for_frame(&mut self) {
+        let frame_idx = self.frames.len() - 1;
+        
+        for uv in &self.open_upvalues {
+            let should_close = {
+                match &*uv.borrow() {
+                    Upvalue::Open { frame_idx: f, .. } => *f == frame_idx,
+                    _ => false,
+                }
+            };
+            
+            if should_close {
+                let value = {
+                    match &*uv.borrow() {
+                        Upvalue::Open { register, .. } => {
+                            self.frames[frame_idx].get_register(*register).clone()
+                        }
+                        Upvalue::Closed(v) => v.clone(),
+                    }
+                };
+                *uv.borrow_mut() = Upvalue::Closed(value);
+            }
+        }
+        
+        // Remove closed upvalues from open list
+        self.open_upvalues.retain(|uv| {
+            matches!(&*uv.borrow(), Upvalue::Open { .. })
+        });
+    }
 
     fn binary_op<F>(&mut self, op: F) -> Result<(), RuntimeError>
     where

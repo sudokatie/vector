@@ -1,8 +1,8 @@
 //! Expression parser using Pratt parsing (precedence climbing)
 
-use super::ast::{BinaryOp, Expr, FunctionDef, UnaryOp};
+use super::ast::{BinaryOp, Expr, FunctionDef, UnaryOp, InterpolationPart};
 use super::{ParseError, Parser};
-use crate::lexer::TokenKind;
+use crate::lexer::{TokenKind, StringPart};
 
 /// Operator precedence levels (higher = tighter binding)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,6 +66,11 @@ impl<'a> Parser<'a> {
                 let s = s.clone();
                 self.advance()?;
                 Ok(Expr::String(s))
+            }
+            TokenKind::InterpolatedString(parts) => {
+                let parts = parts.clone();
+                self.advance()?;
+                self.parse_interpolated_string(parts)
             }
             TokenKind::True => {
                 self.advance()?;
@@ -132,6 +137,18 @@ impl<'a> Parser<'a> {
             // Anonymous function: fn(params) { body }
             TokenKind::Fn => {
                 self.parse_anonymous_function()
+            }
+
+            // If expression: if cond { then_expr } else { else_expr }
+            TokenKind::If => {
+                self.parse_if_expression()
+            }
+
+            // Try expression: try expr
+            TokenKind::Try => {
+                self.advance()?;
+                let expr = self.parse_expr_precedence(Precedence::Unary)?;
+                Ok(Expr::Try(Box::new(expr)))
             }
 
             _ => Err(ParseError::UnexpectedToken {
@@ -312,6 +329,30 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse interpolated string into expression
+    fn parse_interpolated_string(&mut self, parts: Vec<StringPart>) -> Result<Expr, ParseError> {
+        use crate::lexer::Lexer;
+        
+        let mut result_parts = Vec::new();
+        
+        for part in parts {
+            match part {
+                StringPart::Literal(s) => {
+                    result_parts.push(InterpolationPart::Literal(s));
+                }
+                StringPart::Interpolation(expr_src) => {
+                    // Parse the expression source
+                    let lexer = Lexer::new(&expr_src);
+                    let mut parser = Parser::new(lexer);
+                    let expr = parser.parse_expr()?;
+                    result_parts.push(InterpolationPart::Expr(Box::new(expr)));
+                }
+            }
+        }
+        
+        Ok(Expr::Interpolation(result_parts))
+    }
+
     /// Parse anonymous function: fn(params) { body }
     fn parse_anonymous_function(&mut self) -> Result<Expr, ParseError> {
         self.advance()?; // consume 'fn'
@@ -328,6 +369,67 @@ impl<'a> Parser<'a> {
             params,
             body,
         }))
+    }
+
+    /// Parse if expression: if cond { expr } else { expr }
+    pub fn parse_if_expression(&mut self) -> Result<Expr, ParseError> {
+        self.advance()?; // consume 'if'
+        
+        let condition = self.parse_expr()?;
+        
+        self.expect(TokenKind::LeftBrace)?;
+        let then_expr = self.parse_block_expr()?;
+        self.expect(TokenKind::RightBrace)?;
+        
+        let else_expr = if self.match_token(TokenKind::Else)? {
+            if self.check(&TokenKind::If) {
+                // else if - recursively parse
+                Some(Box::new(self.parse_if_expression()?))
+            } else {
+                self.expect(TokenKind::LeftBrace)?;
+                let expr = self.parse_block_expr()?;
+                self.expect(TokenKind::RightBrace)?;
+                Some(Box::new(expr))
+            }
+        } else {
+            None
+        };
+        
+        Ok(Expr::If(Box::new(condition), Box::new(then_expr), else_expr))
+    }
+    
+    /// Parse a block as an expression (returns the last expression value)
+    fn parse_block_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut stmts = Vec::new();
+        
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            stmts.push(self.statement()?);
+        }
+        
+        if stmts.is_empty() {
+            return Ok(Expr::Nil);
+        }
+        
+        // Check if last statement is an expression (for implicit return)
+        // Use match to avoid consuming the value on failed pattern match
+        match stmts.last() {
+            Some(super::ast::Stmt::Expr(_)) => {
+                // Last is expression - if it's the only statement, unwrap it
+                if stmts.len() == 1 {
+                    if let Some(super::ast::Stmt::Expr(expr)) = stmts.pop() {
+                        return Ok(expr);
+                    }
+                }
+                // Otherwise keep as block
+                Ok(Expr::Block(stmts))
+            }
+            Some(_) => {
+                // Last statement is not an expression (e.g., Return, Let, etc.)
+                // Keep all statements in the block
+                Ok(Expr::Block(stmts))
+            }
+            None => Ok(Expr::Nil),
+        }
     }
 
     /// Parse parameter list
@@ -349,64 +451,8 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
-    /// Parse block statements (without braces)
-    pub fn parse_block_stmts(&mut self) -> Result<Vec<super::ast::Stmt>, ParseError> {
-        let mut stmts = Vec::new();
-
-        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
-            stmts.push(self.statement()?);
-        }
-
-        Ok(stmts)
-    }
-
-    /// Check if current token matches (without consuming)
-    pub fn check(&self, kind: &TokenKind) -> bool {
-        self.current.as_ref().map(|t| &t.kind == kind).unwrap_or(false)
-    }
-
-    /// Match and consume token if it matches
-    pub fn match_token(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
-        if self.check(&kind) {
-            self.advance()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Expect and consume a specific token
-    pub fn expect(&mut self, kind: TokenKind) -> Result<(), ParseError> {
-        if self.check(&kind) {
-            self.advance()?;
-            Ok(())
-        } else {
-            let (found, line) = self.current.as_ref()
-                .map(|t| (format!("{}", t.kind), t.line))
-                .unwrap_or(("EOF".to_string(), 0));
-            Err(ParseError::UnexpectedToken {
-                found,
-                expected: format!("{}", kind),
-                line,
-            })
-        }
-    }
-
-    /// Expect and return an identifier
-    pub fn expect_identifier(&mut self) -> Result<String, ParseError> {
-        let token = self.current.clone().ok_or(ParseError::UnexpectedEof)?;
-        match token.kind {
-            TokenKind::Identifier(name) => {
-                self.advance()?;
-                Ok(name)
-            }
-            _ => Err(ParseError::UnexpectedToken {
-                found: format!("{}", token.kind),
-                expected: "identifier".to_string(),
-                line: token.line,
-            }),
-        }
-    }
+    // Helper methods (check, match_token, expect, expect_identifier, parse_block_stmts)
+    // are defined in mod.rs
 }
 
 #[cfg(test)]

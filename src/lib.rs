@@ -33,6 +33,20 @@ impl Vector {
         }
     }
 
+    /// Create a new Vector interpreter with custom heap size
+    pub fn with_heap_size(heap_size: usize) -> Self {
+        Self {
+            vm: vm::VM::with_heap_size(heap_size),
+        }
+    }
+
+    /// Create a new Vector interpreter with custom heap size and no JIT
+    pub fn with_heap_size_no_jit(heap_size: usize) -> Self {
+        let mut vm = vm::VM::with_heap_size(heap_size);
+        vm.set_jit_enabled(false);
+        Self { vm }
+    }
+
     /// Evaluate source code and return the result
     pub fn eval(&mut self, source: &str) -> Result<vm::Value, VectorError> {
         let tokens = lexer::Lexer::new(source);
@@ -62,6 +76,21 @@ impl Vector {
     /// Get profiler statistics
     pub fn profiler_stats(&self) -> Option<&jit::ProfilerStats> {
         self.vm.profiler_stats()
+    }
+
+    /// Get GC statistics
+    pub fn gc_stats(&self) -> &gc::GCStats {
+        self.vm.gc_stats()
+    }
+
+    /// Get heap information: (allocated, max_size, threshold)
+    pub fn heap_info(&self) -> (usize, usize, usize) {
+        self.vm.heap_info()
+    }
+
+    /// Trigger a garbage collection
+    pub fn collect_garbage(&mut self) {
+        self.vm.collect_garbage();
     }
 }
 

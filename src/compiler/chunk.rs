@@ -240,6 +240,262 @@ pub struct Module {
     pub functions: Vec<Function>,
 }
 
+/// Magic number for Vector bytecode files: "VECT"
+const BYTECODE_MAGIC: u32 = 0x56454354;
+/// Bytecode format version
+const BYTECODE_VERSION: u32 = 1;
+
+impl Module {
+    /// Serialize the module to bytecode format
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        
+        // Header
+        bytes.extend_from_slice(&BYTECODE_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&BYTECODE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(self.functions.len() as u32).to_le_bytes());
+        
+        // Main function
+        self.write_function(&self.main, &mut bytes);
+        
+        // Other functions
+        for func in &self.functions {
+            self.write_function(func, &mut bytes);
+        }
+        
+        bytes
+    }
+
+    fn write_function(&self, func: &Function, bytes: &mut Vec<u8>) {
+        // Function name (length-prefixed string)
+        let name_bytes = func.name.as_bytes();
+        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(name_bytes);
+        
+        // Arity and num_locals
+        bytes.push(func.arity);
+        bytes.push(func.num_locals);
+        
+        // Upvalues
+        bytes.push(func.upvalues.len() as u8);
+        for uv in &func.upvalues {
+            bytes.push(uv.index);
+            bytes.push(if uv.is_local { 1 } else { 0 });
+        }
+        
+        // Code
+        bytes.extend_from_slice(&(func.chunk.code.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&func.chunk.code);
+        
+        // Constants
+        bytes.extend_from_slice(&(func.chunk.constants.len() as u32).to_le_bytes());
+        for constant in &func.chunk.constants {
+            self.write_value(constant, bytes);
+        }
+        
+        // Line info (RLE compressed)
+        bytes.extend_from_slice(&(func.chunk.lines.len() as u32).to_le_bytes());
+        for &line in &func.chunk.lines {
+            bytes.extend_from_slice(&line.to_le_bytes());
+        }
+    }
+
+    fn write_value(&self, value: &Value, bytes: &mut Vec<u8>) {
+        match value {
+            Value::Nil => bytes.push(0),
+            Value::Bool(b) => {
+                bytes.push(1);
+                bytes.push(if *b { 1 } else { 0 });
+            }
+            Value::Int(i) => {
+                bytes.push(2);
+                bytes.extend_from_slice(&i.to_le_bytes());
+            }
+            Value::Float(f) => {
+                bytes.push(3);
+                bytes.extend_from_slice(&f.to_le_bytes());
+            }
+            Value::String(s) => {
+                bytes.push(4);
+                let s_bytes = s.as_bytes();
+                bytes.extend_from_slice(&(s_bytes.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(s_bytes);
+            }
+            // Arrays, Tables, Functions, etc. are runtime-only
+            _ => bytes.push(0), // Serialize as nil
+        }
+    }
+
+    /// Deserialize a module from bytecode format
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut offset = 0;
+        
+        // Header
+        if bytes.len() < 12 {
+            return None;
+        }
+        
+        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if magic != BYTECODE_MAGIC {
+            return None;
+        }
+        offset += 4;
+        
+        let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        if version != BYTECODE_VERSION {
+            return None;
+        }
+        offset += 4;
+        
+        let num_functions = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        offset += 4;
+        
+        // Main function
+        let (main, new_offset) = Self::read_function(bytes, offset)?;
+        offset = new_offset;
+        
+        // Other functions
+        let mut functions = Vec::with_capacity(num_functions);
+        for _ in 0..num_functions {
+            let (func, new_offset) = Self::read_function(bytes, offset)?;
+            functions.push(func);
+            offset = new_offset;
+        }
+        
+        Some(Module { main, functions })
+    }
+
+    fn read_function(bytes: &[u8], mut offset: usize) -> Option<(Function, usize)> {
+        // Name length
+        if offset + 4 > bytes.len() { return None; }
+        let name_len = u32::from_le_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+        ]) as usize;
+        offset += 4;
+        
+        // Name
+        if offset + name_len > bytes.len() { return None; }
+        let name = String::from_utf8(bytes[offset..offset+name_len].to_vec()).ok()?;
+        offset += name_len;
+        
+        // Arity and num_locals
+        if offset + 2 > bytes.len() { return None; }
+        let arity = bytes[offset];
+        let num_locals = bytes[offset + 1];
+        offset += 2;
+        
+        // Upvalues
+        if offset + 1 > bytes.len() { return None; }
+        let num_upvalues = bytes[offset] as usize;
+        offset += 1;
+        
+        let mut upvalues = Vec::with_capacity(num_upvalues);
+        for _ in 0..num_upvalues {
+            if offset + 2 > bytes.len() { return None; }
+            let index = bytes[offset];
+            let is_local = bytes[offset + 1] != 0;
+            upvalues.push(UpvalueInfo { index, is_local });
+            offset += 2;
+        }
+        
+        // Code
+        if offset + 4 > bytes.len() { return None; }
+        let code_len = u32::from_le_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+        ]) as usize;
+        offset += 4;
+        
+        if offset + code_len > bytes.len() { return None; }
+        let code = bytes[offset..offset+code_len].to_vec();
+        offset += code_len;
+        
+        // Constants
+        if offset + 4 > bytes.len() { return None; }
+        let num_constants = u32::from_le_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+        ]) as usize;
+        offset += 4;
+        
+        let mut constants = Vec::with_capacity(num_constants);
+        for _ in 0..num_constants {
+            let (value, new_offset) = Self::read_value(bytes, offset)?;
+            constants.push(value);
+            offset = new_offset;
+        }
+        
+        // Lines
+        if offset + 4 > bytes.len() { return None; }
+        let num_lines = u32::from_le_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+        ]) as usize;
+        offset += 4;
+        
+        let mut lines = Vec::with_capacity(num_lines);
+        for _ in 0..num_lines {
+            if offset + 4 > bytes.len() { return None; }
+            let line = u32::from_le_bytes([
+                bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+            ]);
+            lines.push(line);
+            offset += 4;
+        }
+        
+        let func = Function {
+            name,
+            arity,
+            num_locals,
+            chunk: Chunk { code, constants, lines },
+            upvalues,
+        };
+        
+        Some((func, offset))
+    }
+
+    fn read_value(bytes: &[u8], mut offset: usize) -> Option<(Value, usize)> {
+        if offset >= bytes.len() { return None; }
+        
+        let tag = bytes[offset];
+        offset += 1;
+        
+        match tag {
+            0 => Some((Value::Nil, offset)),
+            1 => {
+                if offset >= bytes.len() { return None; }
+                let b = bytes[offset] != 0;
+                Some((Value::Bool(b), offset + 1))
+            }
+            2 => {
+                if offset + 8 > bytes.len() { return None; }
+                let i = i64::from_le_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                Some((Value::Int(i), offset + 8))
+            }
+            3 => {
+                if offset + 8 > bytes.len() { return None; }
+                let f = f64::from_le_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                Some((Value::Float(f), offset + 8))
+            }
+            4 => {
+                if offset + 4 > bytes.len() { return None; }
+                let len = u32::from_le_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]) as usize;
+                offset += 4;
+                
+                if offset + len > bytes.len() { return None; }
+                let s = String::from_utf8(bytes[offset..offset+len].to_vec()).ok()?;
+                Some((Value::String(s), offset + len))
+            }
+            _ => Some((Value::Nil, offset)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

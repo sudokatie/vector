@@ -2,8 +2,9 @@
 
 pub mod ast;
 pub mod expr;
+pub mod stmt;
 
-pub use ast::{Expr, Stmt, BinaryOp, UnaryOp, FunctionDef};
+pub use ast::{Expr, Stmt, BinaryOp, UnaryOp, FunctionDef, Pattern, MatchArm, InterpolationPart};
 
 use crate::lexer::{Lexer, LexError, Token, TokenKind};
 use thiserror::Error;
@@ -50,138 +51,54 @@ impl<'a> Parser<'a> {
         Ok(statements)
     }
 
-    pub fn statement(&mut self) -> Result<Stmt, ParseError> {
-        // Skip any trailing semicolons
-        while self.match_token(TokenKind::Semicolon)? {}
+    // Statement parsing is in stmt.rs
 
-        if self.is_at_end() {
-            return Err(ParseError::UnexpectedEof);
-        }
-
-        // Check for statement-starting keywords
+    pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // Wildcard pattern: _
         if let Some(token) = &self.current {
-            match &token.kind {
-                TokenKind::Let => return self.let_statement(),
-                TokenKind::Fn => return self.function_statement(),
-                TokenKind::If => return self.if_statement(),
-                TokenKind::While => return self.while_statement(),
-                TokenKind::For => return self.for_statement(),
-                TokenKind::Return => return self.return_statement(),
-                _ => {}
+            if let TokenKind::Identifier(name) = &token.kind {
+                if name == "_" {
+                    self.advance()?;
+                    return Ok(Pattern::Wildcard);
+                }
             }
         }
-
-        // Expression statement or assignment
+        
+        // Try to parse a literal or identifier
         let expr = self.parse_expr()?;
-
-        // Check for assignment
-        if self.match_token(TokenKind::Equal)? {
-            let value = self.parse_expr()?;
-            return Ok(Stmt::Assign(expr, value));
+        
+        // Check if expression is a range - convert to Pattern::Range
+        match &expr {
+            Expr::Binary(left, BinaryOp::Range, right) => {
+                return Ok(Pattern::Range(left.clone(), right.clone(), false));
+            }
+            Expr::Binary(left, BinaryOp::RangeInclusive, right) => {
+                return Ok(Pattern::Range(left.clone(), right.clone(), true));
+            }
+            _ => {}
         }
-
-        Ok(Stmt::Expr(expr))
+        
+        // Check for range pattern: expr..expr or expr..=expr (fallback)
+        if self.check(&TokenKind::DotDot) {
+            self.advance()?;
+            let end = self.parse_expr()?;
+            return Ok(Pattern::Range(Box::new(expr), Box::new(end), false));
+        }
+        
+        if self.check(&TokenKind::DotDotEqual) {
+            self.advance()?;
+            let end = self.parse_expr()?;
+            return Ok(Pattern::Range(Box::new(expr), Box::new(end), true));
+        }
+        
+        // Check if it's a binding (identifier) or literal
+        match expr {
+            Expr::Identifier(name) => Ok(Pattern::Binding(name)),
+            _ => Ok(Pattern::Literal(expr)),
+        }
     }
 
-    fn let_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.advance()?; // consume 'let'
-
-        let is_mut = self.match_token(TokenKind::Mut)?;
-        let name = self.expect_identifier()?;
-
-        let initializer = if self.match_token(TokenKind::Equal)? {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-
-        Ok(Stmt::Let(name, is_mut, initializer))
-    }
-
-    fn function_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.advance()?; // consume 'fn'
-
-        let name = self.expect_identifier()?;
-        self.expect(TokenKind::LeftParen)?;
-        let params = self.parse_param_list()?;
-
-        self.expect(TokenKind::LeftBrace)?;
-        let body = self.parse_block_stmts()?;
-        self.expect(TokenKind::RightBrace)?;
-
-        Ok(Stmt::Function(FunctionDef {
-            name: Some(name),
-            params,
-            body,
-        }))
-    }
-
-    fn if_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.advance()?; // consume 'if'
-
-        let condition = self.parse_expr()?;
-        self.expect(TokenKind::LeftBrace)?;
-        let then_branch = self.parse_block_stmts()?;
-        self.expect(TokenKind::RightBrace)?;
-
-        let else_branch = if self.match_token(TokenKind::Else)? {
-            if self.check(&TokenKind::If) {
-                // else if
-                Some(vec![self.if_statement()?])
-            } else {
-                self.expect(TokenKind::LeftBrace)?;
-                let stmts = self.parse_block_stmts()?;
-                self.expect(TokenKind::RightBrace)?;
-                Some(stmts)
-            }
-        } else {
-            None
-        };
-
-        Ok(Stmt::If(condition, then_branch, else_branch))
-    }
-
-    fn while_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.advance()?; // consume 'while'
-
-        let condition = self.parse_expr()?;
-        self.expect(TokenKind::LeftBrace)?;
-        let body = self.parse_block_stmts()?;
-        self.expect(TokenKind::RightBrace)?;
-
-        Ok(Stmt::While(condition, body))
-    }
-
-    fn for_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.advance()?; // consume 'for'
-
-        let name = self.expect_identifier()?;
-        self.expect(TokenKind::In)?;
-        let iterable = self.parse_expr()?;
-
-        self.expect(TokenKind::LeftBrace)?;
-        let body = self.parse_block_stmts()?;
-        self.expect(TokenKind::RightBrace)?;
-
-        Ok(Stmt::For(name, iterable, body))
-    }
-
-    fn return_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.advance()?; // consume 'return'
-
-        // Check if there's an expression or just bare return
-        let value = if !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
-            if !self.check(&TokenKind::Semicolon) {
-                Some(self.parse_expr()?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(Stmt::Return(value))
-    }
+    // === Helper methods ===
 
     pub(crate) fn advance(&mut self) -> Result<(), ParseError> {
         self.previous = self.current.take();
@@ -195,6 +112,78 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn is_at_end(&self) -> bool {
         self.current.is_none()
+    }
+
+    pub(crate) fn check(&self, kind: &TokenKind) -> bool {
+        self.current.as_ref().map_or(false, |t| &t.kind == kind)
+    }
+
+    pub(crate) fn match_token(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
+        if self.check(&kind) {
+            self.advance()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub(crate) fn expect(&mut self, kind: TokenKind) -> Result<(), ParseError> {
+        if self.check(&kind) {
+            self.advance()?;
+            Ok(())
+        } else {
+            let found = self.current.as_ref()
+                .map(|t| format!("{}", t.kind))
+                .unwrap_or_else(|| "EOF".to_string());
+            let line = self.current.as_ref().map(|t| t.line).unwrap_or(0);
+            Err(ParseError::UnexpectedToken {
+                found,
+                expected: format!("{}", kind),
+                line,
+            })
+        }
+    }
+
+    pub(crate) fn expect_identifier(&mut self) -> Result<String, ParseError> {
+        if let Some(token) = &self.current {
+            if let TokenKind::Identifier(name) = &token.kind {
+                let name = name.clone();
+                self.advance()?;
+                return Ok(name);
+            }
+        }
+        let found = self.current.as_ref()
+            .map(|t| format!("{}", t.kind))
+            .unwrap_or_else(|| "EOF".to_string());
+        let line = self.current.as_ref().map(|t| t.line).unwrap_or(0);
+        Err(ParseError::UnexpectedToken {
+            found,
+            expected: "identifier".to_string(),
+            line,
+        })
+    }
+
+    /// Peek at the next token after current to check if it's an identifier
+    /// Used to distinguish `fn name(...)` from `fn(...)`
+    pub(crate) fn peek_is_identifier(&self) -> bool {
+        // Clone lexer state to peek
+        let mut peek_lexer = self.lexer.clone();
+        if let Ok(next_token) = peek_lexer.next_token() {
+            matches!(next_token.kind, TokenKind::Identifier(_))
+        } else {
+            false
+        }
+    }
+
+    /// Parse block statements (without braces)
+    pub fn parse_block_stmts(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let mut stmts = Vec::new();
+
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            stmts.push(self.statement()?);
+        }
+
+        Ok(stmts)
     }
 }
 
@@ -259,28 +248,27 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_if() {
+    fn test_parse_if_expr() {
+        // If is parsed as an expression, wrapped in Stmt::Expr
         let stmts = parse("if true { 1 }").unwrap();
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            Stmt::If(cond, then_branch, else_branch) => {
-                assert_eq!(*cond, Expr::Bool(true));
-                assert_eq!(then_branch.len(), 1);
-                assert!(else_branch.is_none());
+            Stmt::Expr(Expr::If(cond, _, _)) => {
+                assert_eq!(**cond, Expr::Bool(true));
             }
-            _ => panic!("Expected If"),
+            _ => panic!("Expected Stmt::Expr(Expr::If(...))"),
         }
     }
 
     #[test]
-    fn test_parse_if_else() {
+    fn test_parse_if_else_expr() {
         let stmts = parse("if false { 1 } else { 2 }").unwrap();
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            Stmt::If(_, _, else_branch) => {
+            Stmt::Expr(Expr::If(_, _, else_branch)) => {
                 assert!(else_branch.is_some());
             }
-            _ => panic!("Expected If"),
+            _ => panic!("Expected Stmt::Expr(Expr::If(...))"),
         }
     }
 

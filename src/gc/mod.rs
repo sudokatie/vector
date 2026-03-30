@@ -14,6 +14,15 @@
 //! 2. Process gray objects, marking children gray and object black
 //! 3. Sweep all remaining white objects
 //!
+//! # Generational Collection
+//!
+//! The generational GC divides the heap into:
+//! - Young generation (nursery): Small, frequently collected
+//! - Old generation: Larger, collected less often
+//!
+//! Objects that survive multiple young collections are promoted to old.
+//! A write barrier tracks cross-generational references.
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -33,9 +42,11 @@
 
 pub mod heap;
 pub mod trace;
+pub mod generational;
 
 pub use heap::{
     Color, GcBox, GcBorrow, GcBorrowMut, GcRef, Heap, 
     ObjectHeader, Trace, TypeTag,
 };
 pub use trace::{GCStats, GC};
+pub use generational::{GenerationalGC, GenGCStats, WriteBarrier, WriteBarrierStats, Generation};

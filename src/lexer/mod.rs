@@ -2,7 +2,7 @@
 
 mod token;
 
-pub use token::{Token, TokenKind, Span};
+pub use token::{Token, TokenKind, Span, StringPart};
 
 use thiserror::Error;
 
@@ -23,6 +23,7 @@ pub enum LexError {
 }
 
 /// Lexer for Vector source code
+#[derive(Clone)]
 pub struct Lexer<'a> {
     source: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
@@ -203,6 +204,9 @@ impl<'a> Lexer<'a> {
 
     fn string(&mut self) -> Result<Token, LexError> {
         let start_line = self.line;
+        let mut parts: Vec<StringPart> = Vec::new();
+        let mut current_literal = String::new();
+        let mut has_interpolation = false;
 
         while let Some(&(_, c)) = self.chars.peek() {
             if c == '"' {
@@ -210,11 +214,66 @@ impl<'a> Lexer<'a> {
             }
             if c == '\n' {
                 self.line += 1;
-            }
-            if c == '\\' {
+                current_literal.push(c);
                 self.advance();
-                self.advance(); // Skip escaped character
+            } else if c == '\\' {
+                self.advance();
+                // Handle escape sequences
+                if let Some(&(_, escaped)) = self.chars.peek() {
+                    self.advance();
+                    match escaped {
+                        'n' => current_literal.push('\n'),
+                        't' => current_literal.push('\t'),
+                        'r' => current_literal.push('\r'),
+                        '\\' => current_literal.push('\\'),
+                        '"' => current_literal.push('"'),
+                        '{' => current_literal.push('{'),
+                        '}' => current_literal.push('}'),
+                        _ => {
+                            current_literal.push('\\');
+                            current_literal.push(escaped);
+                        }
+                    }
+                }
+            } else if c == '{' {
+                self.advance(); // consume '{'
+                has_interpolation = true;
+                
+                // Save current literal if non-empty
+                if !current_literal.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_literal)));
+                }
+                
+                // Parse interpolation expression (until matching '}')
+                let mut expr = String::new();
+                let mut brace_depth = 1;
+                
+                while brace_depth > 0 {
+                    if self.is_at_end() {
+                        return Err(LexError::UnterminatedString(start_line));
+                    }
+                    if let Some(&(_, c)) = self.chars.peek() {
+                        self.advance();
+                        if c == '{' {
+                            brace_depth += 1;
+                            expr.push(c);
+                        } else if c == '}' {
+                            brace_depth -= 1;
+                            if brace_depth > 0 {
+                                expr.push(c);
+                            }
+                        } else {
+                            if c == '\n' {
+                                self.line += 1;
+                            }
+                            expr.push(c);
+                        }
+                    }
+                }
+                
+                parts.push(StringPart::Interpolation(expr.trim().to_string()));
             } else {
+                current_literal.push(c);
                 self.advance();
             }
         }
@@ -225,9 +284,22 @@ impl<'a> Lexer<'a> {
 
         self.advance(); // Closing quote
 
-        let value = &self.source[self.start + 1..self.current - 1];
+        // If no interpolation, return simple string
+        if !has_interpolation {
+            return Ok(Token::new(
+                TokenKind::String(current_literal),
+                Span::new(self.start, self.current),
+                self.line,
+            ));
+        }
+
+        // Save final literal if non-empty
+        if !current_literal.is_empty() {
+            parts.push(StringPart::Literal(current_literal));
+        }
+
         Ok(Token::new(
-            TokenKind::String(value.to_string()),
+            TokenKind::InterpolatedString(parts),
             Span::new(self.start, self.current),
             self.line,
         ))

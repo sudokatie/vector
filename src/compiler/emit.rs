@@ -118,9 +118,21 @@ impl Compiler {
                     BinaryOp::Shl => OpCode::Shl,
                     BinaryOp::Shr => OpCode::Shr,
                     BinaryOp::Concat => OpCode::Concat,
-                    BinaryOp::Range | BinaryOp::RangeInclusive => {
-                        // Ranges are handled specially at runtime
-                        return Err(CompileError::NotImplemented("ranges".to_string()));
+                    BinaryOp::Range => {
+                        // Emit range creation
+                        self.emit(OpCode::MakeRange);
+                        self.emit_byte(dst);
+                        self.emit_byte(dst);
+                        self.emit_byte(dst + 1);
+                        return Ok(());
+                    }
+                    BinaryOp::RangeInclusive => {
+                        // Emit inclusive range creation
+                        self.emit(OpCode::MakeRangeIncl);
+                        self.emit_byte(dst);
+                        self.emit_byte(dst);
+                        self.emit_byte(dst + 1);
+                        return Ok(());
                     }
                 };
 
@@ -145,18 +157,44 @@ impl Compiler {
             }
 
             Expr::Call(callee, args) => {
-                // Compile callee into dst
-                self.compile_expr(callee, dst)?;
+                // Check for method call: obj.method(args)
+                if let Expr::Field(obj, method_name) = callee.as_ref() {
+                    // Compile object
+                    self.compile_expr(obj, dst)?;
+                    
+                    // Load method name as constant
+                    let name_idx = self.add_constant(Value::String(method_name.clone()))?;
+                    self.emit(OpCode::LoadConst);
+                    self.emit_byte(dst + 1);
+                    self.emit_u16(name_idx);
+                    
+                    // Compile args
+                    for (i, arg) in args.iter().enumerate() {
+                        self.compile_expr(arg, dst + 2 + i as u8)?;
+                    }
+                    
+                    // MethodCall: dst = obj.method(args)
+                    // At runtime: if obj is table with method -> call that
+                    //             else -> call global method(obj, args)
+                    self.emit(OpCode::MethodCall);
+                    self.emit_byte(dst);        // result dest
+                    self.emit_byte(dst);        // object reg
+                    self.emit_byte(dst + 1);    // method name reg
+                    self.emit_byte(args.len() as u8);  // argc
+                } else {
+                    // Regular function call
+                    self.compile_expr(callee, dst)?;
 
-                // Compile args into consecutive registers
-                for (i, arg) in args.iter().enumerate() {
-                    self.compile_expr(arg, dst + 1 + i as u8)?;
+                    // Compile args into consecutive registers
+                    for (i, arg) in args.iter().enumerate() {
+                        self.compile_expr(arg, dst + 1 + i as u8)?;
+                    }
+
+                    self.emit(OpCode::Call);
+                    self.emit_byte(dst);
+                    self.emit_byte(dst);
+                    self.emit_byte(args.len() as u8);
                 }
-
-                self.emit(OpCode::Call);
-                self.emit_byte(dst);
-                self.emit_byte(dst);
-                self.emit_byte(args.len() as u8);
             }
 
             Expr::Index(array, index) => {
@@ -208,17 +246,278 @@ impl Compiler {
 
             Expr::Block(stmts) => {
                 self.begin_scope();
-                for stmt in stmts {
-                    self.compile_stmt(stmt)?;
+                if stmts.is_empty() {
+                    self.emit(OpCode::LoadNil);
+                    self.emit_byte(dst);
+                } else {
+                    // Compile all but last statement normally
+                    for stmt in &stmts[..stmts.len() - 1] {
+                        self.compile_stmt(stmt)?;
+                    }
+                    // Handle last statement based on type
+                    match stmts.last() {
+                        Some(crate::parser::Stmt::Expr(last_expr)) => {
+                            // Expression - compile to dst for implicit return
+                            self.compile_expr(last_expr, dst)?;
+                        }
+                        Some(crate::parser::Stmt::Return(_)) => {
+                            // Return statement - compile it, no need for LoadNil
+                            // (control flow exits the function)
+                            if let Some(last_stmt) = stmts.last() {
+                                self.compile_stmt(last_stmt)?;
+                            }
+                        }
+                        Some(last_stmt) => {
+                            // Other statement - compile and load nil as block value
+                            self.compile_stmt(last_stmt)?;
+                            self.emit(OpCode::LoadNil);
+                            self.emit_byte(dst);
+                        }
+                        None => {
+                            self.emit(OpCode::LoadNil);
+                            self.emit_byte(dst);
+                        }
+                    }
                 }
                 self.end_scope();
-                // Block evaluates to nil by default
-                self.emit(OpCode::LoadNil);
-                self.emit_byte(dst);
             }
 
             Expr::Function(def) => {
                 self.compile_function(def, dst)?;
+            }
+
+            Expr::Match(value, arms) => {
+                // Compile the value to match against
+                self.compile_expr(value, dst)?;
+                
+                let mut end_jumps = Vec::new();
+                
+                for arm in arms {
+                    // For each arm, check if pattern matches
+                    match &arm.pattern {
+                        crate::parser::Pattern::Wildcard => {
+                            // Wildcard always matches - compile body directly
+                            self.compile_expr(&arm.body, dst)?;
+                            // Jump to end (this is the last arm effectively)
+                            self.emit(OpCode::Jump);
+                            end_jumps.push(self.emit_jump_placeholder());
+                        }
+                        crate::parser::Pattern::Literal(lit_expr) => {
+                            // Compare value with literal
+                            self.compile_expr(lit_expr, dst + 1)?;
+                            self.emit(OpCode::Eq);
+                            self.emit_byte(dst + 2);
+                            self.emit_byte(dst);
+                            self.emit_byte(dst + 1);
+                            
+                            // Jump if not equal
+                            self.emit(OpCode::JumpIfNot);
+                            self.emit_byte(dst + 2);
+                            let next_arm = self.emit_jump_placeholder();
+                            
+                            // Check guard if present
+                            if let Some(guard) = &arm.guard {
+                                self.compile_expr(guard, dst + 2)?;
+                                self.emit(OpCode::JumpIfNot);
+                                self.emit_byte(dst + 2);
+                                let guard_fail = self.emit_jump_placeholder();
+                                
+                                // Pattern and guard matched - compile body
+                                self.compile_expr(&arm.body, dst)?;
+                                self.emit(OpCode::Jump);
+                                end_jumps.push(self.emit_jump_placeholder());
+                                
+                                self.patch_jump(guard_fail);
+                            } else {
+                                // Pattern matched - compile body
+                                self.compile_expr(&arm.body, dst)?;
+                                self.emit(OpCode::Jump);
+                                end_jumps.push(self.emit_jump_placeholder());
+                            }
+                            
+                            self.patch_jump(next_arm);
+                        }
+                        crate::parser::Pattern::Binding(name) => {
+                            // Binding pattern - bind value to name and execute body
+                            self.begin_scope();
+                            let slot = self.declare_local(name)?;
+                            self.emit(OpCode::Move);
+                            self.emit_byte(slot);
+                            self.emit_byte(dst);
+                            
+                            // Check guard if present
+                            if let Some(guard) = &arm.guard {
+                                self.compile_expr(guard, dst + 1)?;
+                                self.emit(OpCode::JumpIfNot);
+                                self.emit_byte(dst + 1);
+                                let guard_fail = self.emit_jump_placeholder();
+                                
+                                self.compile_expr(&arm.body, dst)?;
+                                self.end_scope();
+                                self.emit(OpCode::Jump);
+                                end_jumps.push(self.emit_jump_placeholder());
+                                
+                                self.patch_jump(guard_fail);
+                            } else {
+                                self.compile_expr(&arm.body, dst)?;
+                                self.end_scope();
+                                self.emit(OpCode::Jump);
+                                end_jumps.push(self.emit_jump_placeholder());
+                            }
+                        }
+                        crate::parser::Pattern::Range(start, end, inclusive) => {
+                            // Range pattern: start <= value && value < end (or <= if inclusive)
+                            self.compile_expr(start, dst + 1)?;
+                            self.compile_expr(end, dst + 2)?;
+                            
+                            // Check value >= start
+                            self.emit(OpCode::Ge);
+                            self.emit_byte(dst + 3);
+                            self.emit_byte(dst);
+                            self.emit_byte(dst + 1);
+                            
+                            self.emit(OpCode::JumpIfNot);
+                            self.emit_byte(dst + 3);
+                            let next_arm = self.emit_jump_placeholder();
+                            
+                            // Check value < end (or <= if inclusive)
+                            if *inclusive {
+                                self.emit(OpCode::Le);
+                            } else {
+                                self.emit(OpCode::Lt);
+                            }
+                            self.emit_byte(dst + 3);
+                            self.emit_byte(dst);
+                            self.emit_byte(dst + 2);
+                            
+                            self.emit(OpCode::JumpIfNot);
+                            self.emit_byte(dst + 3);
+                            let range_fail = self.emit_jump_placeholder();
+                            
+                            // Pattern matched - compile body
+                            self.compile_expr(&arm.body, dst)?;
+                            self.emit(OpCode::Jump);
+                            end_jumps.push(self.emit_jump_placeholder());
+                            
+                            self.patch_jump(next_arm);
+                            self.patch_jump(range_fail);
+                        }
+                    }
+                }
+                
+                // If no pattern matched, result is nil
+                self.emit(OpCode::LoadNil);
+                self.emit_byte(dst);
+                
+                // Patch all end jumps
+                for jump in end_jumps {
+                    self.patch_jump(jump);
+                }
+            }
+
+            Expr::Try(inner) => {
+                // Try expression - wraps result in a Result-like table
+                // { ok: true, value: result } or { ok: false, err: error_msg }
+                // For now, we just compile the inner expression and wrap success
+                // Real error handling would need VM support for catch/throw
+                
+                // Compile inner expression
+                self.compile_expr(inner, dst)?;
+                
+                // Create result table { ok: true, value: <result> }
+                self.emit(OpCode::NewTable);
+                self.emit_byte(dst + 1);
+                
+                // Set ok = true
+                let ok_idx = self.add_constant(Value::String("ok".to_string()))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(ok_idx);
+                self.emit(OpCode::LoadTrue);
+                self.emit_byte(dst + 3);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Set value = result
+                let val_idx = self.add_constant(Value::String("value".to_string()))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(val_idx);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst);
+                
+                // Move result table to dst
+                self.emit(OpCode::Move);
+                self.emit_byte(dst);
+                self.emit_byte(dst + 1);
+            }
+
+            Expr::Interpolation(parts) => {
+                // String interpolation - concatenate all parts
+                if parts.is_empty() {
+                    let idx = self.add_constant(Value::String(String::new()))?;
+                    self.emit(OpCode::LoadConst);
+                    self.emit_byte(dst);
+                    self.emit_u16(idx);
+                } else {
+                    // Compile first part
+                    match &parts[0] {
+                        crate::parser::InterpolationPart::Literal(s) => {
+                            let idx = self.add_constant(Value::String(s.clone()))?;
+                            self.emit(OpCode::LoadConst);
+                            self.emit_byte(dst);
+                            self.emit_u16(idx);
+                        }
+                        crate::parser::InterpolationPart::Expr(e) => {
+                            // Convert to string using str(e)
+                            // Call convention: func at dst, args at dst+1, dst+2, ...
+                            let str_idx = self.add_name("str")?;
+                            self.emit(OpCode::GetGlobal);
+                            self.emit_byte(dst);
+                            self.emit_u16(str_idx);
+                            self.compile_expr(e, dst + 1)?;
+                            self.emit(OpCode::Call);
+                            self.emit_byte(dst);
+                            self.emit_byte(dst);
+                            self.emit_byte(1);
+                        }
+                    }
+                    
+                    // Concatenate remaining parts
+                    for part in parts.iter().skip(1) {
+                        match part {
+                            crate::parser::InterpolationPart::Literal(s) => {
+                                let idx = self.add_constant(Value::String(s.clone()))?;
+                                self.emit(OpCode::LoadConst);
+                                self.emit_byte(dst + 1);
+                                self.emit_u16(idx);
+                            }
+                            crate::parser::InterpolationPart::Expr(e) => {
+                                // Convert to string using str(e)
+                                // Use dst+1 as temp call location
+                                let str_idx = self.add_name("str")?;
+                                self.emit(OpCode::GetGlobal);
+                                self.emit_byte(dst + 1);
+                                self.emit_u16(str_idx);
+                                self.compile_expr(e, dst + 2)?;
+                                self.emit(OpCode::Call);
+                                self.emit_byte(dst + 1);
+                                self.emit_byte(dst + 1);
+                                self.emit_byte(1);
+                            }
+                        }
+                        
+                        // Concatenate
+                        self.emit(OpCode::Concat);
+                        self.emit_byte(dst);
+                        self.emit_byte(dst);
+                        self.emit_byte(dst + 1);
+                    }
+                }
             }
         }
 
@@ -342,31 +641,41 @@ impl Compiler {
             Stmt::For(name, iterable, body) => {
                 // for x in iter { body }
                 // Compiled as:
-                //   iter_val = iterable
-                //   iter = get_iter(iter_val)
-                // loop:
-                //   x = iter_next(iter) or jump to end
+                //   $iter = get_iter(iterable)  (hidden local)
+                // loop_start:
+                //   (x, $done) = iter_next($iter)
+                //   jump_if $done end
                 //   body
-                //   jump loop
+                //   jump loop_start
                 // end:
 
                 self.begin_scope();
 
-                // Compile iterable and get iterator
-                self.compile_expr(iterable, 0)?;
-                self.emit(OpCode::GetIter);
-                self.emit_byte(1);
-                self.emit_byte(0);
-
-                let loop_start = self.current_offset();
-
+                // Declare hidden iterator local (use a name that can't conflict)
+                let iter_slot = self.declare_local(&format!("$iter_{}", self.locals.len()))?;
+                // Declare hidden done flag local
+                let done_slot = self.declare_local(&format!("$done_{}", self.locals.len()))?;
                 // Declare loop variable
                 let var_slot = self.declare_local(name)?;
 
-                // Get next value or jump to end
+                // Compile iterable to temp, then get iterator into iter_slot
+                let temp = self.next_temp_register();
+                self.compile_expr(iterable, temp)?;
+                self.emit(OpCode::GetIter);
+                self.emit_byte(iter_slot);
+                self.emit_byte(temp);
+
+                let loop_start = self.current_offset();
+
+                // Get next value, sets done flag
                 self.emit(OpCode::IterNext);
                 self.emit_byte(var_slot);
-                self.emit_byte(1);
+                self.emit_byte(done_slot);
+                self.emit_byte(iter_slot);
+
+                // Jump to end if done
+                self.emit(OpCode::JumpIf);
+                self.emit_byte(done_slot);
                 let exit_jump = self.emit_jump_placeholder();
 
                 // Compile body
@@ -443,12 +752,22 @@ impl Compiler {
         func_compiler.end_scope();
 
         // Add function to constants and emit closure
+        // Note: nested function definitions added their functions to our functions vec via enclosing
         let func = func_compiler.finish();
+        let num_upvalues = func.upvalues.len();
+        let upvalue_info: Vec<_> = func.upvalues.iter().cloned().collect();
         let func_idx = self.add_function(func)?;
 
         self.emit(OpCode::Closure);
         self.emit_byte(dst);
         self.emit_u16(func_idx);
+        
+        // Emit upvalue info (is_local, index for each upvalue)
+        self.emit_byte(num_upvalues as u8);
+        for uv in upvalue_info {
+            self.emit_byte(if uv.is_local { 1 } else { 0 });
+            self.emit_byte(uv.index);
+        }
 
         Ok(())
     }

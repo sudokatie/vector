@@ -13,6 +13,7 @@ pub enum OpCode {
 
     // Register operations
     Move = 10,        // dst, src
+    Copy = 11,        // dst, src (deep copy)
 
     // Arithmetic (dst, left, right)
     Add = 20,
@@ -58,6 +59,7 @@ pub enum OpCode {
     TailCall = 81,    // func, argc
     Return = 82,      // src
     ReturnNil = 83,
+    MethodCall = 84,  // dst, obj, method_name, argc - calls obj.method or method(obj, args)
 
     // Variables
     GetGlobal = 90,   // dst, name_idx
@@ -79,9 +81,13 @@ pub enum OpCode {
     Closure = 110,    // dst, func_idx
     CloseUpvalue = 111, // slot
 
+    // Ranges
+    MakeRange = 115,      // dst, start, end (exclusive)
+    MakeRangeIncl = 116,  // dst, start, end (inclusive)
+
     // Iteration
     GetIter = 120,    // dst, iterable
-    IterNext = 121,   // dst, iter, end_offset
+    IterNext = 121,   // dst_val, dst_done, iter - sets dst_val to next value, dst_done to true if exhausted
 }
 
 impl OpCode {
@@ -91,7 +97,7 @@ impl OpCode {
             OpCode::LoadNil | OpCode::LoadTrue | OpCode::LoadFalse |
             OpCode::ReturnNil => 1, // just dst
 
-            OpCode::Move | OpCode::Neg | OpCode::Not | OpCode::BitNot |
+            OpCode::Move | OpCode::Copy | OpCode::Neg | OpCode::Not | OpCode::BitNot |
             OpCode::Return | OpCode::GetLocal | OpCode::SetLocal |
             OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue |
             OpCode::NewArray | OpCode::GetIter => 2, // dst, src/slot
@@ -111,7 +117,9 @@ impl OpCode {
             OpCode::BitXor | OpCode::Shl | OpCode::Shr | OpCode::Concat |
             OpCode::ArrayGet | OpCode::ArraySet | OpCode::TableGet |
             OpCode::TableSet | OpCode::Call | OpCode::TailCall |
-            OpCode::IterNext => 3, // 3 register operands
+            OpCode::IterNext | OpCode::MakeRange | OpCode::MakeRangeIncl => 3, // 3 register operands
+            
+            OpCode::MethodCall => 4, // dst, obj, method_name, argc
         }
     }
 

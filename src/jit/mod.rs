@@ -3,9 +3,19 @@
 pub mod profile;
 pub mod codegen;
 pub mod cache;
+pub mod inline_cache;
+pub mod osr;
 
 pub use profile::{Profiler, ProfilerStats, TypeTag, DominantType};
 pub use cache::CodeCache;
+pub use inline_cache::{
+    InlineCacheManager, ICStats, PolymorphicIC, ICState,
+    ShapeId, PropertySlot, AccessSite, Shape, ShapeTable,
+};
+pub use osr::{
+    OSRManager, OSRStats, OSREntryPoint, DeoptPoint, DeoptReason,
+    TypeGuard, GuardedType, DeoptFrame, DeoptBuffer,
+};
 
 use crate::compiler::Function;
 use thiserror::Error;
