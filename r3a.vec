@@ -1,0 +1,8 @@
+let x = 42
+let mut y = 1
+y = 2
+print(x)
+print(y)
+
+fn add(a, b) { return a + b }
+print(add(2, 3))

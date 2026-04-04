@@ -154,16 +154,44 @@ impl Chunk {
                 (format!("{:12} r{} <- r{}({})", op, dst, func, argc), offset + 4)
             }
 
-            OpCode::GetGlobal | OpCode::SetGlobal => {
+            OpCode::GetGlobal => {
                 let reg = self.code.get(offset + 1).copied().unwrap_or(0);
                 let idx = self.read_u16(offset + 2);
-                (format!("{:12} r{} global[{}]", op, reg, idx), offset + 4)
+                (format!("{:12} r{} <- global[{}]", op, reg, idx), offset + 4)
+            }
+
+            OpCode::SetGlobal => {
+                // SetGlobal format: u16(name_idx), src
+                let idx = self.read_u16(offset + 1);
+                let src = self.code.get(offset + 3).copied().unwrap_or(0);
+                (format!("{:12} global[{}] <- r{}", op, idx, src), offset + 4)
             }
 
             OpCode::GetLocal | OpCode::SetLocal => {
                 let reg = self.code.get(offset + 1).copied().unwrap_or(0);
                 let slot = self.code.get(offset + 2).copied().unwrap_or(0);
                 (format!("{:12} r{} local[{}]", op, reg, slot), offset + 3)
+            }
+
+            OpCode::Closure => {
+                let dst = self.code.get(offset + 1).copied().unwrap_or(0);
+                let func_idx = self.read_u16(offset + 2);
+                let num_upvalues = self.code.get(offset + 4).copied().unwrap_or(0);
+                // Variable length: 1 opcode + 1 dst + 2 func_idx + 1 num_upvalues + 2*num_upvalues
+                let total_len = 5 + (num_upvalues as usize) * 2;
+                (format!("{:12} r{} <- func[{}] ({}uv)", op, dst, func_idx, num_upvalues), 
+                 offset + total_len)
+            }
+
+            OpCode::NewTable => {
+                let dst = self.code.get(offset + 1).copied().unwrap_or(0);
+                (format!("{:12} r{}", op, dst), offset + 2)
+            }
+
+            OpCode::NewArray => {
+                let dst = self.code.get(offset + 1).copied().unwrap_or(0);
+                let count = self.code.get(offset + 2).copied().unwrap_or(0);
+                (format!("{:12} r{} [{}]", op, dst, count), offset + 3)
             }
 
             _ => (format!("{}", op), offset + 1 + op.operand_size()),
@@ -196,7 +224,8 @@ impl TryFrom<u8> for OpCode {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         // Safety: We only convert valid opcodes
-        if value <= 121 {
+        // Range: 0-121 (base opcodes) and 125-126 (TryStart/TryEnd)
+        if value <= 121 || (value >= 125 && value <= 126) {
             Ok(unsafe { std::mem::transmute(value) })
         } else {
             Err(())
@@ -209,6 +238,8 @@ impl TryFrom<u8> for OpCode {
 pub struct Function {
     pub name: String,
     pub arity: u8,
+    pub num_registers: u8,
+    pub num_upvalues: u8,
     pub num_locals: u8,
     pub chunk: Chunk,
     pub upvalues: Vec<UpvalueInfo>,
@@ -219,10 +250,19 @@ impl Function {
         Self {
             name: name.into(),
             arity,
+            num_registers: 0,
+            num_upvalues: 0,
             num_locals: 0,
             chunk: Chunk::new(),
             upvalues: Vec::new(),
         }
+    }
+    
+    /// Update num_upvalues from upvalues vec
+    pub fn finalize(&mut self) {
+        self.num_upvalues = self.upvalues.len() as u8;
+        // num_registers = max(num_locals, arity) + some headroom for temps
+        self.num_registers = self.num_locals.max(self.arity).saturating_add(16);
     }
 }
 
@@ -238,6 +278,37 @@ pub struct UpvalueInfo {
 pub struct Module {
     pub main: Function,
     pub functions: Vec<Function>,
+    /// Interned strings (deduplicated)
+    pub strings: Vec<String>,
+}
+
+impl Module {
+    /// Create a new module
+    pub fn new(main: Function, functions: Vec<Function>) -> Self {
+        Self {
+            main,
+            functions,
+            strings: Vec::new(),
+        }
+    }
+    
+    /// Intern a string, returning its index
+    pub fn intern_string(&mut self, s: &str) -> u32 {
+        // Check if already interned
+        for (i, existing) in self.strings.iter().enumerate() {
+            if existing == s {
+                return i as u32;
+            }
+        }
+        // Add new string
+        self.strings.push(s.to_string());
+        (self.strings.len() - 1) as u32
+    }
+    
+    /// Get an interned string by index
+    pub fn get_string(&self, idx: u32) -> Option<&str> {
+        self.strings.get(idx as usize).map(|s| s.as_str())
+    }
 }
 
 /// Magic number for Vector bytecode files: "VECT"
@@ -254,6 +325,14 @@ impl Module {
         bytes.extend_from_slice(&BYTECODE_MAGIC.to_le_bytes());
         bytes.extend_from_slice(&BYTECODE_VERSION.to_le_bytes());
         bytes.extend_from_slice(&(self.functions.len() as u32).to_le_bytes());
+        
+        // Interned strings
+        bytes.extend_from_slice(&(self.strings.len() as u32).to_le_bytes());
+        for s in &self.strings {
+            let s_bytes = s.as_bytes();
+            bytes.extend_from_slice(&(s_bytes.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(s_bytes);
+        }
         
         // Main function
         self.write_function(&self.main, &mut bytes);
@@ -272,8 +351,10 @@ impl Module {
         bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(name_bytes);
         
-        // Arity and num_locals
+        // Arity, num_registers, num_upvalues, num_locals
         bytes.push(func.arity);
+        bytes.push(func.num_registers);
+        bytes.push(func.num_upvalues);
         bytes.push(func.num_locals);
         
         // Upvalues
@@ -350,6 +431,27 @@ impl Module {
         let num_functions = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
         offset += 4;
         
+        // Interned strings
+        if offset + 4 > bytes.len() { return None; }
+        let num_strings = u32::from_le_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+        ]) as usize;
+        offset += 4;
+        
+        let mut strings = Vec::with_capacity(num_strings);
+        for _ in 0..num_strings {
+            if offset + 4 > bytes.len() { return None; }
+            let len = u32::from_le_bytes([
+                bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]
+            ]) as usize;
+            offset += 4;
+            
+            if offset + len > bytes.len() { return None; }
+            let s = String::from_utf8(bytes[offset..offset+len].to_vec()).ok()?;
+            strings.push(s);
+            offset += len;
+        }
+        
         // Main function
         let (main, new_offset) = Self::read_function(bytes, offset)?;
         offset = new_offset;
@@ -362,7 +464,7 @@ impl Module {
             offset = new_offset;
         }
         
-        Some(Module { main, functions })
+        Some(Module { main, functions, strings })
     }
 
     fn read_function(bytes: &[u8], mut offset: usize) -> Option<(Function, usize)> {
@@ -378,19 +480,21 @@ impl Module {
         let name = String::from_utf8(bytes[offset..offset+name_len].to_vec()).ok()?;
         offset += name_len;
         
-        // Arity and num_locals
-        if offset + 2 > bytes.len() { return None; }
+        // Arity, num_registers, num_upvalues, num_locals
+        if offset + 4 > bytes.len() { return None; }
         let arity = bytes[offset];
-        let num_locals = bytes[offset + 1];
-        offset += 2;
+        let num_registers = bytes[offset + 1];
+        let num_upvalues = bytes[offset + 2];
+        let num_locals = bytes[offset + 3];
+        offset += 4;
         
         // Upvalues
         if offset + 1 > bytes.len() { return None; }
-        let num_upvalues = bytes[offset] as usize;
+        let upvalue_count = bytes[offset] as usize;
         offset += 1;
         
-        let mut upvalues = Vec::with_capacity(num_upvalues);
-        for _ in 0..num_upvalues {
+        let mut upvalues = Vec::with_capacity(upvalue_count);
+        for _ in 0..upvalue_count {
             if offset + 2 > bytes.len() { return None; }
             let index = bytes[offset];
             let is_local = bytes[offset + 1] != 0;
@@ -443,6 +547,8 @@ impl Module {
         let func = Function {
             name,
             arity,
+            num_registers,
+            num_upvalues,
             num_locals,
             chunk: Chunk { code, constants, lines },
             upvalues,

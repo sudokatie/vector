@@ -14,8 +14,11 @@ pub type NativeFn = fn(&[Value]) -> Result<Value, RuntimeError>;
 /// Built-in higher-order functions (need VM access for callbacks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinHOF {
+    /// Map: (array, fn) -> new_array where each element is fn(elem)
     Map,
+    /// Filter: (array, fn) -> new_array where fn(elem) is truthy
     Filter,
+    /// Reduce: (array, fn, initial) -> fn(fn(fn(initial, e1), e2), e3)...
     Reduce,
 }
 

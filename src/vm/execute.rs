@@ -1,12 +1,15 @@
 //! Bytecode execution engine
 
-use super::{VM, RuntimeError};
+use super::{VM, RuntimeError, ErrorHandler};
 use super::value::{Value, Closure, Upvalue, BuiltinHOF};
 use super::frame::CallFrame;
 use crate::compiler::{OpCode, Module};
 use crate::jit::TypeTag;
 use std::rc::Rc;
 use std::cell::RefCell;
+
+/// Instruction counter for periodic GC checks
+const GC_CHECK_INTERVAL: u64 = 10000;
 
 impl VM {
     /// Run a compiled module
@@ -28,7 +31,7 @@ impl VM {
         self.execute()
     }
 
-    /// Record a function call for JIT profiling
+    /// Record a function call for JIT profiling and type specialization
     fn profile_call(&mut self, func_idx: usize) {
         if let Some(jit) = &mut self.jit {
             jit.record_call(func_idx);
@@ -38,10 +41,15 @@ impl VM {
     /// Record a loop iteration for JIT profiling
     fn profile_loop(&mut self, loop_offset: usize) {
         if let Some(jit) = &mut self.jit {
-            // Use current function index
             let func_idx = self.frames.len().saturating_sub(1);
             jit.record_loop(func_idx, loop_offset);
         }
+    }
+
+    /// Profile a local variable's type for specialization
+    fn profile_local_type(&mut self, func_idx: usize, slot: u8, value: &Value) {
+        let type_tag = Self::value_type_tag(value);
+        self.type_specializer.record_type(func_idx, slot, type_tag);
     }
 
     /// Get type tag for a value (for profiling)
@@ -59,14 +67,58 @@ impl VM {
         }
     }
 
+    /// Check if GC should run
+    fn maybe_collect_garbage(&mut self, instruction_count: &mut u64) {
+        *instruction_count += 1;
+        if *instruction_count >= GC_CHECK_INTERVAL {
+            *instruction_count = 0;
+            
+            // Check generational GC
+            if self.integrated.should_collect_young() {
+                // Would collect young generation here
+                // Currently using Rc<RefCell> so this is a no-op
+            }
+        }
+    }
+
     /// Main execution loop
     fn execute(&mut self) -> Result<Value, RuntimeError> {
         self.execute_until(0)
     }
+
+    /// Handle an error, checking for try/catch handlers
+    /// Returns Ok(true) if the error was handled (jumped to catch block)
+    /// Returns Ok(false) if execution should continue (no error)
+    /// Returns Err if the error should propagate
+    fn handle_error(&mut self, err: RuntimeError) -> Result<bool, RuntimeError> {
+        if let Some(handler) = self.error_handlers.pop() {
+            // We have an error handler - jump to catch block
+            // Unwind frames to the handler's frame if needed
+            while self.frames.len() > handler.frame_idx + 1 {
+                self.frames.pop();
+            }
+            
+            // Set the error message in the destination register
+            let error_msg = format!("{}", err);
+            self.set_register(handler.dst, Value::String(error_msg));
+            
+            // Jump to the catch block
+            self.frame_mut().ip = handler.catch_ip;
+            
+            Ok(true) // Error was handled
+        } else {
+            Err(err) // Propagate error
+        }
+    }
     
     /// Execute until frame depth drops to target_depth
     fn execute_until(&mut self, target_depth: usize) -> Result<Value, RuntimeError> {
+        let mut instruction_count: u64 = 0;
+        
         loop {
+            // Periodic GC check
+            self.maybe_collect_garbage(&mut instruction_count);
+            
             let op = self.read_opcode()?;
 
             match op {
@@ -324,6 +376,18 @@ impl VM {
                     let offset = self.read_u16()?;
                     let loop_start = self.frame().ip - offset as usize;
                     self.profile_loop(loop_start);
+                    
+                    // Check for on-stack replacement opportunity
+                    let func_idx = self.frames.len().saturating_sub(1);
+                    if self.integrated.can_osr(func_idx, loop_start) {
+                        self.integrated.record_osr_entry();
+                        // In a full implementation, we would:
+                        // 1. Save current register state
+                        // 2. Jump to JIT compiled code
+                        // 3. Resume from native code
+                        // For now, continue with interpreter
+                    }
+                    
                     self.frame_mut().ip -= offset as usize;
                 }
 
@@ -387,12 +451,27 @@ impl VM {
                             for i in 0..argc {
                                 args.push(self.get_register(dst + 1 + i).clone());
                             }
-                            let result = native_fn(&args)?;
-                            self.set_register(dst, result);
+                            match native_fn(&args) {
+                                Ok(result) => self.set_register(dst, result),
+                                Err(err) => {
+                                    // Check for try/catch handler
+                                    if !self.handle_error(err)? {
+                                        // Error was not handled, should not reach here
+                                        // because handle_error returns Err if no handler
+                                    }
+                                    // If we get here, error was caught - continue execution
+                                }
+                            }
                         }
                         Value::BuiltinHOF(hof) => {
-                            let result = self.call_builtin_hof(hof, dst, argc)?;
-                            self.set_register(dst, result);
+                            match self.call_builtin_hof(hof, dst, argc) {
+                                Ok(result) => self.set_register(dst, result),
+                                Err(err) => {
+                                    if !self.handle_error(err)? {
+                                        // Should not reach here
+                                    }
+                                }
+                            }
                         }
                         _ => return Err(RuntimeError::NotCallable(callee.type_name().to_string())),
                     }
@@ -428,15 +507,21 @@ impl VM {
 
                     if let Some(func) = callee {
                         // Call method from table: table.method(args)
-                        let mut args = Vec::with_capacity(argc as usize);
+                        // Always pass object as first argument (self)
+                        let mut args = Vec::with_capacity(argc as usize + 1);
+                        args.push(obj.clone()); // self is first arg
                         for i in 0..argc {
                             args.push(self.get_register(dst + 2 + i).clone());
                         }
                         
                         match func {
                             Value::NativeFunction(native_fn) => {
-                                let result = native_fn(&args)?;
-                                self.set_register(dst, result);
+                                match native_fn(&args) {
+                                    Ok(result) => self.set_register(dst, result),
+                                    Err(err) => {
+                                        if !self.handle_error(err)? {}
+                                    }
+                                }
                             }
                             Value::Function(func_idx) => {
                                 let f = self.functions[func_idx as usize].clone();
@@ -454,6 +539,14 @@ impl VM {
                                 }
                                 self.current_upvalues = closure.upvalues.clone();
                                 self.frames.push(new_frame);
+                            }
+                            Value::BuiltinHOF(hof) => {
+                                match self.call_builtin_hof(hof, dst, argc) {
+                                    Ok(result) => self.set_register(dst, result),
+                                    Err(err) => {
+                                        if !self.handle_error(err)? {}
+                                    }
+                                }
                             }
                             _ => return Err(RuntimeError::NotCallable(func.type_name().to_string())),
                         }
@@ -607,6 +700,11 @@ impl VM {
                     let slot = self.read_byte()?;
                     let src = self.read_byte()?;
                     let value = self.get_register(src).clone();
+                    
+                    // Profile the type for JIT specialization
+                    let func_idx = self.frames.len().saturating_sub(1);
+                    self.profile_local_type(func_idx, slot, &value);
+                    
                     self.set_register(slot, value);
                 }
 
@@ -723,15 +821,47 @@ impl VM {
                     let dst = self.read_byte()?;
                     let tbl = self.read_byte()?;
                     let key = self.read_byte()?;
-
+                    
+                    let bytecode_offset = self.frame().ip as u32;
                     let table = self.get_register(tbl).clone();
                     let key_val = self.get_register(key).clone();
 
                     match &table {
-                        Value::Table(tbl) => {
-                            let tbl = tbl.borrow();
-                            let value = tbl.get(&key_val).cloned().unwrap_or(Value::Nil);
-                            self.set_register(dst, value);
+                        Value::Table(t) => {
+                            // Try inline cache for string keys
+                            if let Value::String(key_str) = &key_val {
+                                // Compute shape hash from table pointer
+                                let shape_hash = std::rc::Rc::as_ptr(t) as u64;
+                                let shape_id = self.integrated.get_shape(shape_hash);
+                                
+                                // Try cache lookup
+                                if let Some(slot) = self.integrated.ic_lookup(
+                                    bytecode_offset, 
+                                    key_str, 
+                                    shape_id
+                                ) {
+                                    // Cache hit - use slot offset directly
+                                    // In a full implementation, we'd use slot.offset
+                                    // to access the property directly
+                                    let borrowed = t.borrow();
+                                    let value = borrowed.get(&key_val).cloned().unwrap_or(Value::Nil);
+                                    self.set_register(dst, value);
+                                } else {
+                                    // Cache miss - do regular lookup and record
+                                    let borrowed = t.borrow();
+                                    let value = borrowed.get(&key_val).cloned().unwrap_or(Value::Nil);
+                                    self.set_register(dst, value);
+                                    
+                                    // Record for future cache hits
+                                    let slot = crate::jit::PropertySlot { offset: 0, is_own: true };
+                                    self.integrated.ic_record(bytecode_offset, key_str, shape_id, slot);
+                                }
+                            } else {
+                                // Non-string key - regular lookup
+                                let borrowed = t.borrow();
+                                let value = borrowed.get(&key_val).cloned().unwrap_or(Value::Nil);
+                                self.set_register(dst, value);
+                            }
                         }
                         _ => return Err(RuntimeError::TypeError {
                             expected: "table".to_string(),
@@ -1036,6 +1166,25 @@ impl VM {
                             self.set_register(dst_done, Value::Bool(true));
                         }
                     }
+                }
+
+                // Error handling
+                OpCode::TryStart => {
+                    let dst = self.read_byte()?;
+                    let catch_offset = self.read_i16()? as i32;
+                    let current_ip = self.frame().ip;
+                    let catch_ip = (current_ip as i32 + catch_offset) as usize;
+                    
+                    self.error_handlers.push(ErrorHandler {
+                        dst,
+                        catch_ip,
+                        frame_idx: self.frames.len() - 1,
+                    });
+                }
+
+                OpCode::TryEnd => {
+                    // Pop the current error handler
+                    self.error_handlers.pop();
                 }
             }
         }

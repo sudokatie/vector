@@ -16,6 +16,7 @@ use thiserror::Error;
 /// High-level Vector interpreter API
 pub struct Vector {
     vm: vm::VM,
+    opt_level: compiler::OptLevel,
 }
 
 impl Vector {
@@ -23,6 +24,7 @@ impl Vector {
     pub fn new() -> Self {
         Self {
             vm: vm::VM::new(),
+            opt_level: compiler::OptLevel::default(),
         }
     }
 
@@ -30,6 +32,7 @@ impl Vector {
     pub fn new_without_jit() -> Self {
         Self {
             vm: vm::VM::new_without_jit(),
+            opt_level: compiler::OptLevel::default(),
         }
     }
 
@@ -37,6 +40,7 @@ impl Vector {
     pub fn with_heap_size(heap_size: usize) -> Self {
         Self {
             vm: vm::VM::with_heap_size(heap_size),
+            opt_level: compiler::OptLevel::default(),
         }
     }
 
@@ -44,7 +48,15 @@ impl Vector {
     pub fn with_heap_size_no_jit(heap_size: usize) -> Self {
         let mut vm = vm::VM::with_heap_size(heap_size);
         vm.set_jit_enabled(false);
-        Self { vm }
+        Self { 
+            vm,
+            opt_level: compiler::OptLevel::default(),
+        }
+    }
+
+    /// Set optimization level
+    pub fn set_opt_level(&mut self, level: compiler::OptLevel) {
+        self.opt_level = level;
     }
 
     /// Evaluate source code and return the result
@@ -52,15 +64,35 @@ impl Vector {
         let tokens = lexer::Lexer::new(source);
         let mut parser = parser::Parser::new(tokens);
         let ast = parser.parse()?;
-        let module = compiler::Compiler::new().compile(&ast)?;
+        let mut module = compiler::Compiler::new().compile(&ast)?;
+        
+        // Apply optimizations
+        let optimizer = compiler::Optimizer::new(self.opt_level);
+        optimizer.optimize(&mut module);
+        
         self.vm.run(module).map_err(VectorError::Runtime)
     }
 
-    /// Run a script file
+    /// Run a script file (auto-detects source vs bytecode)
     pub fn run_file(&mut self, path: &str) -> Result<vm::Value, VectorError> {
-        let source = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| VectorError::Io(e.to_string()))?;
-        self.eval(&source)
+        
+        // Check for bytecode magic: 0x56454354 stored as little-endian = "TCEV"
+        if bytes.len() >= 4 && &bytes[0..4] == b"TCEV" {
+            self.run_bytecode(&bytes)
+        } else {
+            let source = String::from_utf8(bytes)
+                .map_err(|e| VectorError::Io(e.to_string()))?;
+            self.eval(&source)
+        }
+    }
+
+    /// Run pre-compiled bytecode
+    pub fn run_bytecode(&mut self, bytes: &[u8]) -> Result<vm::Value, VectorError> {
+        let module = compiler::Module::from_bytes(bytes)
+            .ok_or_else(|| VectorError::Io("Invalid bytecode format".to_string()))?;
+        self.vm.run(module).map_err(VectorError::Runtime)
     }
 
     /// Enable or disable JIT compilation

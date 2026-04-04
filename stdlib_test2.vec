@@ -1,0 +1,12 @@
+// Core
+print(len("hello"))
+print(len([1,2,3]))
+print(len({a:1, b:2}))
+
+// String functions
+print(split("a,b,c", ","))
+print(trim("  hello  "))
+print(upper("hello"))
+print(lower("HELLO"))
+print(contains("hello", "ell"))
+print(replace("foo", "o", "0"))

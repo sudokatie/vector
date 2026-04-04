@@ -1,0 +1,98 @@
+// === SPEC REVIEW ===
+
+// TYPES
+print(type(nil))
+print(type(true))
+print(type(42))
+print(type(3.14))
+print(type("hello"))
+print(type([1,2]))
+print(type({a:1}))
+print(type(fn(){}))
+
+// ARITHMETIC
+print(1+2)
+print(5-3)
+print(2*3)
+print(8/2)
+print(7%3)
+print(2**4)
+
+// COMPARISON
+print(1<2)
+print(2<=2)
+print(3>2)
+print(3>=3)
+print(1==1)
+print(1!=2)
+
+// LOGICAL
+print(true and false)
+print(true or false)
+print(not true)
+
+// BITWISE
+print(6&3)
+print(6|3)
+print(6^3)
+print(~0)
+print(4<<1)
+print(8>>1)
+
+// STRING
+print("a"++"b")
+
+// VARIABLES
+let x = 42
+let mut y = 1
+y = 2
+print(x)
+print(y)
+
+// FUNCTIONS
+fn add(a, b) { return a + b }
+print(add(2, 3))
+let dbl = fn(x) { x * 2 }
+print(dbl(5))
+
+// CONTROL FLOW
+if true { print("if") }
+if false { print("bad") } else { print("else") }
+
+// WHILE
+let mut i = 0
+while i < 2 {
+    print(i)
+    i = i + 1
+}
+
+// FOR RANGE
+for j in 0..3 { print(j) }
+
+// FOR ARRAY
+for item in [10, 20] { print(item) }
+
+// MATCH
+print(match 5 { 0 => "zero", 1..10 => "small", _ => "big" })
+
+// TABLES
+let t = { name: "Alice", age: 30 }
+print(t.name)
+print(t["age"])
+
+// ARRAYS
+let arr = [1, 2, 3]
+print(arr[0])
+print(len(arr))
+
+// STRING INTERPOLATION
+let name = "World"
+print("Hello, {name}!")
+
+// ERROR HANDLING
+let ok = try 42
+print(ok.ok)
+print(ok.value)
+let err = try error("oops")
+print(err.is_err())
+print(err.err())

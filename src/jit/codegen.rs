@@ -138,6 +138,28 @@ impl<'a> BytecodeTranslator<'a> {
         }
     }
 
+    /// Check if a register has a dominant type based on profiling
+    fn get_dominant_type(&self, register: u8) -> Option<super::DominantType> {
+        self.profile
+            .and_then(|p| p.local_types.get(&register))
+            .and_then(|tp| tp.dominant_type())
+    }
+
+    /// Check if function is hot enough for aggressive optimization
+    fn is_hot(&self) -> bool {
+        self.profile
+            .map(|p| p.call_count >= 100)
+            .unwrap_or(false)
+    }
+
+    /// Check if a specific loop is hot
+    fn is_loop_hot(&self, loop_offset: usize) -> bool {
+        self.profile
+            .and_then(|p| p.loop_counts.get(&loop_offset))
+            .map(|&count| count >= 50)
+            .unwrap_or(false)
+    }
+
     /// Compile the function
     pub fn compile(&mut self) -> Result<CompiledCode, JitError> {
         // Create JIT module with proper settings
@@ -400,14 +422,29 @@ impl<'a> BytecodeTranslator<'a> {
                 builder.def_var(self.variables[dst], val);
             }
 
-            // Arithmetic operations
+            // Arithmetic operations - uses type specialization from profiles
             OpCode::Add => {
                 let dst = self.read_byte() as usize;
                 let left = self.read_byte() as usize;
                 let right = self.read_byte() as usize;
                 let lval = builder.use_var(self.variables[left]);
                 let rval = builder.use_var(self.variables[right]);
-                let result = builder.ins().iadd(lval, rval);
+                
+                // Check if we have type profile data for specialization
+                let use_float = self.get_dominant_type(left as u8)
+                    .map(|t| t == super::DominantType::Float)
+                    .unwrap_or(false)
+                    || self.get_dominant_type(right as u8)
+                    .map(|t| t == super::DominantType::Float)
+                    .unwrap_or(false);
+                
+                let result = if use_float {
+                    // Float specialization
+                    builder.ins().fadd(lval, rval)
+                } else {
+                    // Default: integer add
+                    builder.ins().iadd(lval, rval)
+                };
                 builder.def_var(self.variables[dst], result);
             }
 
@@ -417,7 +454,16 @@ impl<'a> BytecodeTranslator<'a> {
                 let right = self.read_byte() as usize;
                 let lval = builder.use_var(self.variables[left]);
                 let rval = builder.use_var(self.variables[right]);
-                let result = builder.ins().isub(lval, rval);
+                
+                let use_float = self.get_dominant_type(left as u8)
+                    .map(|t| t == super::DominantType::Float)
+                    .unwrap_or(false);
+                
+                let result = if use_float {
+                    builder.ins().fsub(lval, rval)
+                } else {
+                    builder.ins().isub(lval, rval)
+                };
                 builder.def_var(self.variables[dst], result);
             }
 
@@ -427,7 +473,16 @@ impl<'a> BytecodeTranslator<'a> {
                 let right = self.read_byte() as usize;
                 let lval = builder.use_var(self.variables[left]);
                 let rval = builder.use_var(self.variables[right]);
-                let result = builder.ins().imul(lval, rval);
+                
+                let use_float = self.get_dominant_type(left as u8)
+                    .map(|t| t == super::DominantType::Float)
+                    .unwrap_or(false);
+                
+                let result = if use_float {
+                    builder.ins().fmul(lval, rval)
+                } else {
+                    builder.ins().imul(lval, rval)
+                };
                 builder.def_var(self.variables[dst], result);
             }
 
@@ -437,7 +492,16 @@ impl<'a> BytecodeTranslator<'a> {
                 let right = self.read_byte() as usize;
                 let lval = builder.use_var(self.variables[left]);
                 let rval = builder.use_var(self.variables[right]);
-                let result = builder.ins().sdiv(lval, rval);
+                
+                let use_float = self.get_dominant_type(left as u8)
+                    .map(|t| t == super::DominantType::Float)
+                    .unwrap_or(false);
+                
+                let result = if use_float {
+                    builder.ins().fdiv(lval, rval)
+                } else {
+                    builder.ins().sdiv(lval, rval)
+                };
                 builder.def_var(self.variables[dst], result);
             }
 
@@ -760,6 +824,13 @@ impl<'a> BytecodeTranslator<'a> {
                 self.offset += operand_size;
                 // These need interpreter support
             }
+            
+            // Error handling - always interpreter
+            OpCode::TryStart | OpCode::TryEnd => {
+                let operand_size = op.operand_size();
+                self.offset += operand_size;
+                // Try/catch needs interpreter support
+            }
         }
 
         Ok(())
@@ -804,6 +875,8 @@ mod tests {
         let func = Function {
             name: "test".to_string(),
             arity: 0,
+            num_registers: 16,
+            num_upvalues: 0,
             num_locals: 0,
             chunk: Chunk::new(),
             upvalues: vec![],
@@ -821,6 +894,8 @@ mod tests {
         let func = Function {
             name: "add".to_string(),
             arity: 2,
+            num_registers: 16,
+            num_upvalues: 0,
             num_locals: 0,
             chunk: Chunk::new(),
             upvalues: vec![],
@@ -864,6 +939,8 @@ mod tests {
         let func = Function {
             name: "add_test".to_string(),
             arity: 0,
+            num_registers: 16,
+            num_upvalues: 0,
             num_locals: 2,
             chunk,
             upvalues: vec![],
@@ -900,6 +977,8 @@ mod tests {
         let func = Function {
             name: "add".to_string(),
             arity: 2,
+            num_registers: 16,
+            num_upvalues: 0,
             num_locals: 2,
             chunk,
             upvalues: vec![],
@@ -934,6 +1013,8 @@ mod tests {
         let func = Function {
             name: "lt".to_string(),
             arity: 2,
+            num_registers: 16,
+            num_upvalues: 0,
             num_locals: 2,
             chunk,
             upvalues: vec![],

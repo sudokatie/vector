@@ -1,0 +1,13 @@
+let arr = [3, 1, 2]
+push(arr, 4)
+print(arr)
+print(pop(arr))
+print(arr)
+insert(arr, 0, 0)
+print(arr)
+remove(arr, 0)
+print(arr)
+sort(arr)
+print(arr)
+reverse(arr)
+print(arr)

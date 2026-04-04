@@ -148,7 +148,9 @@ fn print_help() {
 }
 
 fn create_vector(opts: &Options) -> Vector {
-    if opts.no_jit {
+    use vector::compiler::OptLevel;
+    
+    let mut v = if opts.no_jit {
         if let Some(size) = opts.heap_size {
             Vector::with_heap_size_no_jit(size)
         } else {
@@ -158,7 +160,17 @@ fn create_vector(opts: &Options) -> Vector {
         Vector::with_heap_size(size)
     } else {
         Vector::new()
-    }
+    };
+    
+    // Set optimization level
+    let opt_level = match opts.opt_level {
+        0 => OptLevel::O0,
+        1 => OptLevel::O1,
+        _ => OptLevel::O2,
+    };
+    v.set_opt_level(opt_level);
+    
+    v
 }
 
 fn repl(opts: &Options) {
@@ -264,17 +276,9 @@ fn simple_repl(opts: &Options) {
 }
 
 fn run_file(path: &str, opts: &Options) {
-    let source = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Error reading file '{}': {}", path, e);
-            process::exit(1);
-        }
-    };
-
     let mut vector = create_vector(opts);
 
-    match vector.eval(&source) {
+    match vector.run_file(path) {
         Ok(_) => {
             if opts.show_stats {
                 print_stats(&vector);

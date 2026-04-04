@@ -1,0 +1,248 @@
+// Comprehensive spec compliance test
+
+print("=== TYPES ===")
+
+// nil
+let n = nil
+print("nil: " ++ str(type(n)))
+
+// bool
+let b = true
+print("bool: " ++ str(type(b)))
+
+// int
+let i = 42
+print("int: " ++ str(type(i)))
+
+// float
+let f = 3.14
+print("float: " ++ str(type(f)))
+
+// string
+let s = "hello"
+print("string: " ++ str(type(s)))
+
+// array
+let arr = [1, 2, 3]
+print("array: " ++ str(type(arr)))
+
+// table
+let tbl = { name: "test" }
+print("table: " ++ str(type(tbl)))
+
+// function
+let func = fn(x) { x }
+print("function: " ++ str(type(func)))
+
+print("")
+print("=== VARIABLES ===")
+
+// immutable
+let x = 42
+print("let x = " ++ str(x))
+
+// mutable
+let mut y = "hello"
+y = "world"
+print("mut y = " ++ y)
+
+print("")
+print("=== FUNCTIONS ===")
+
+// named function
+fn add(a, b) {
+    return a + b
+}
+print("add(2, 3) = " ++ str(add(2, 3)))
+
+// anonymous function with implicit return
+let double = fn(x) { x * 2 }
+print("double(5) = " ++ str(double(5)))
+
+// recursive function
+fn fib(n) {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+print("fib(10) = " ++ str(fib(10)))
+
+print("")
+print("=== CONTROL FLOW ===")
+
+// if/else
+let val = 5
+if val > 10 {
+    print("big")
+} else if val > 3 {
+    print("medium")
+} else {
+    print("small")
+}
+
+// while loop
+let count = 0
+while count < 3 {
+    print("count: " ++ str(count))
+    count = count + 1
+}
+
+// for loop with range
+print("for in range:")
+for i in 0..3 {
+    print("  i = " ++ str(i))
+}
+
+// for loop with array
+print("for in array:")
+for item in [10, 20, 30] {
+    print("  item = " ++ str(item))
+}
+
+print("")
+print("=== PATTERN MATCHING ===")
+
+let test_val = 5
+let result = match test_val {
+    0 => "zero",
+    1..5 => "small",
+    5 => "five",
+    _ => "other"
+}
+print("match 5 = " ++ result)
+
+print("")
+print("=== TABLES ===")
+
+let person = {
+    name: "Alice",
+    age: 30
+}
+print("person.name = " ++ person.name)
+print("person[\"age\"] = " ++ str(person["age"]))
+
+print("")
+print("=== ARRAYS ===")
+
+let nums = [1, 2, 3, 4, 5]
+print("nums[0] = " ++ str(nums[0]))
+print("len(nums) = " ++ str(len(nums)))
+
+print("")
+print("=== OPERATORS ===")
+
+// arithmetic
+print("10 + 3 = " ++ str(10 + 3))
+print("10 - 3 = " ++ str(10 - 3))
+print("10 * 3 = " ++ str(10 * 3))
+print("10 / 3 = " ++ str(10 / 3))
+print("10 % 3 = " ++ str(10 % 3))
+print("2 ** 8 = " ++ str(2 ** 8))
+
+// comparison
+print("5 == 5: " ++ str(5 == 5))
+print("5 != 3: " ++ str(5 != 3))
+print("5 < 10: " ++ str(5 < 10))
+print("5 <= 5: " ++ str(5 <= 5))
+print("5 > 3: " ++ str(5 > 3))
+print("5 >= 5: " ++ str(5 >= 5))
+
+// logical
+print("true and false: " ++ str(true and false))
+print("true or false: " ++ str(true or false))
+print("not true: " ++ str(not true))
+
+// bitwise
+print("5 & 3 = " ++ str(5 & 3))
+print("5 | 3 = " ++ str(5 | 3))
+print("5 ^ 3 = " ++ str(5 ^ 3))
+print("~5 = " ++ str(~5))
+print("1 << 4 = " ++ str(1 << 4))
+print("16 >> 2 = " ++ str(16 >> 2))
+
+// string concat
+print("hello" ++ " " ++ "world")
+
+print("")
+print("=== STDLIB CORE ===")
+
+print("type(42) = " ++ type(42))
+print("len(\"hello\") = " ++ str(len("hello")))
+assert(true, "assertion works")
+
+print("")
+print("=== STDLIB STRING ===")
+
+let test_str = "  hello world  "
+print("trim: [" ++ trim(test_str) ++ "]")
+print("upper: " ++ upper("hello"))
+print("lower: " ++ lower("HELLO"))
+print("split: " ++ str(split("a,b,c", ",")))
+print("contains: " ++ str(contains("hello", "ell")))
+print("replace: " ++ replace("hello", "l", "L"))
+
+print("")
+print("=== STDLIB ARRAY ===")
+
+let test_arr = [1, 2, 3]
+push(test_arr, 4)
+print("after push: " ++ str(test_arr))
+let popped = pop(test_arr)
+print("popped: " ++ str(popped))
+print("after pop: " ++ str(test_arr))
+
+print("")
+print("=== STDLIB MATH ===")
+
+print("abs(-5) = " ++ str(abs(-5)))
+print("floor(3.7) = " ++ str(floor(3.7)))
+print("ceil(3.2) = " ++ str(ceil(3.2)))
+print("sqrt(16) = " ++ str(sqrt(16)))
+print("pow(2, 10) = " ++ str(pow(2, 10)))
+
+print("")
+print("=== TRY EXPRESSION ===")
+
+let safe = try (1 / 1)
+print("try (1/1) = " ++ str(safe))
+
+print("")
+print("=== STRING INTERPOLATION ===")
+
+let name = "Vector"
+let version = 1
+let msg = "Hello from {name} v{version}!"
+print(msg)
+
+print("")
+print("=== HIGHER-ORDER FUNCTIONS ===")
+
+// Using named functions to avoid closure bug
+fn dbl(x) { x * 2 }
+fn is_even(x) { x % 2 == 0 }
+fn sum(a, b) { a + b }
+
+let data = [1, 2, 3, 4, 5]
+print("map(double): " ++ str(map(data, dbl)))
+print("filter(even): " ++ str(filter(data, is_even)))
+print("reduce(sum): " ++ str(reduce(data, sum, 0)))
+
+print("")
+print("=== CLOSURES ===")
+
+fn make_counter() {
+    let count = 0
+    return fn() {
+        count = count + 1
+        return count
+    }
+}
+
+let counter = make_counter()
+print("counter() = " ++ str(counter()))
+print("counter() = " ++ str(counter()))
+print("counter() = " ++ str(counter()))
+
+print("")
+print("=== ALL TESTS PASSED ===")

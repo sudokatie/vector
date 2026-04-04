@@ -88,6 +88,10 @@ pub enum OpCode {
     // Iteration
     GetIter = 120,    // dst, iterable
     IterNext = 121,   // dst_val, dst_done, iter - sets dst_val to next value, dst_done to true if exhausted
+    
+    // Error handling
+    TryStart = 125,   // dst, catch_offset - start try block, jump to catch_offset on error
+    TryEnd = 126,     // end try block (pop error handler)
 }
 
 impl OpCode {
@@ -103,8 +107,12 @@ impl OpCode {
             OpCode::NewArray | OpCode::GetIter => 2, // dst, src/slot
 
             OpCode::LoadInt => 5, // dst + i32
-            OpCode::LoadConst | OpCode::GetGlobal | OpCode::SetGlobal |
-            OpCode::Closure | OpCode::NewTable => 3, // dst + u16
+            OpCode::LoadConst | OpCode::GetGlobal | OpCode::SetGlobal => 3, // dst + u16
+            
+            // Closure is variable length - handled specially in disassembler
+            OpCode::Closure => 3, // Note: actual size is 4 + 2*num_upvalues
+            
+            OpCode::NewTable => 1, // just dst
 
             OpCode::Jump | OpCode::Loop => 2, // i16 offset
 
@@ -120,6 +128,9 @@ impl OpCode {
             OpCode::IterNext | OpCode::MakeRange | OpCode::MakeRangeIncl => 3, // 3 register operands
             
             OpCode::MethodCall => 4, // dst, obj, method_name, argc
+            
+            OpCode::TryStart => 3, // dst, catch_offset (u16)
+            OpCode::TryEnd => 0,   // no operands
         }
     }
 

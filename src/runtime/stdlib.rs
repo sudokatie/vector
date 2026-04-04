@@ -57,7 +57,67 @@ pub fn error_fn(args: &[Value]) -> Result<Value, RuntimeError> {
     let msg = args.first()
         .map(|v| format!("{}", v))
         .unwrap_or_else(|| "error".to_string());
-    panic!("{}", msg);
+    Err(RuntimeError::UserError(msg))
+}
+
+// ============================================================================
+// Result methods (for try expression results)
+// ============================================================================
+
+/// Check if a Result table represents an error
+/// Called as result.is_err() - self is passed as first arg
+pub fn result_is_err_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    // First arg is self (the result table)
+    match args.first() {
+        Some(Value::Table(tbl)) => {
+            let borrowed = tbl.borrow();
+            // Check if ok field is false
+            if let Some(ok_val) = borrowed.get(&Value::String("ok".to_string())) {
+                Ok(Value::Bool(!ok_val.is_truthy()))
+            } else {
+                // No ok field, assume it's not an error
+                Ok(Value::Bool(false))
+            }
+        }
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+/// Get the error message from a Result table
+/// Called as result.err() - self is passed as first arg
+pub fn result_err_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    // First arg is self (the result table)
+    match args.first() {
+        Some(Value::Table(tbl)) => {
+            let borrowed = tbl.borrow();
+            // Return the _error field if it exists (internal storage for error message)
+            if let Some(err_val) = borrowed.get(&Value::String("_error".to_string())) {
+                Ok(err_val.clone())
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        _ => Ok(Value::Nil),
+    }
+}
+
+/// Get the value from a Result table (for successful results)
+/// Called as result.unwrap() - self is passed as first arg
+pub fn result_unwrap_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match args.first() {
+        Some(Value::Table(tbl)) => {
+            let borrowed = tbl.borrow();
+            if let Some(ok_val) = borrowed.get(&Value::String("ok".to_string())) {
+                if ok_val.is_truthy() {
+                    if let Some(val) = borrowed.get(&Value::String("value".to_string())) {
+                        return Ok(val.clone());
+                    }
+                }
+            }
+            Err(RuntimeError::UserError("called unwrap on error result".to_string()))
+        }
+        _ => Err(RuntimeError::UserError("unwrap called on non-result".to_string())),
+    }
 }
 
 pub fn str_fn(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -169,7 +229,18 @@ pub fn replace_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 // Math functions
 // ============================================================================
 
+/// Helper: skip self (table) argument when called as method
+/// Returns args unchanged if first arg is not a table
+fn skip_self(args: &[Value]) -> &[Value] {
+    if let Some(Value::Table(_)) = args.first() {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
 pub fn abs_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
         Some(Value::Float(n)) => Ok(Value::Float(n.abs())),
@@ -182,6 +253,7 @@ pub fn abs_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn floor_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Int(*n)),
         Some(Value::Float(n)) => Ok(Value::Int(n.floor() as i64)),
@@ -194,6 +266,7 @@ pub fn floor_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn ceil_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Int(*n)),
         Some(Value::Float(n)) => Ok(Value::Int(n.ceil() as i64)),
@@ -206,6 +279,7 @@ pub fn ceil_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn sqrt_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Float((*n as f64).sqrt())),
         Some(Value::Float(n)) => Ok(Value::Float(n.sqrt())),
@@ -218,6 +292,7 @@ pub fn sqrt_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn pow_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     let base = match args.first() {
         Some(Value::Int(n)) => *n as f64,
         Some(Value::Float(n)) => *n,
@@ -238,6 +313,7 @@ pub fn pow_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn sin_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Float((*n as f64).sin())),
         Some(Value::Float(n)) => Ok(Value::Float(n.sin())),
@@ -250,6 +326,7 @@ pub fn sin_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn cos_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Float((*n as f64).cos())),
         Some(Value::Float(n)) => Ok(Value::Float(n.cos())),
@@ -262,6 +339,7 @@ pub fn cos_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn tan_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     match args.first() {
         Some(Value::Int(n)) => Ok(Value::Float((*n as f64).tan())),
         Some(Value::Float(n)) => Ok(Value::Float(n.tan())),
@@ -274,6 +352,7 @@ pub fn tan_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn min_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     if args.is_empty() {
         return Ok(Value::Nil);
     }
@@ -291,6 +370,7 @@ pub fn min_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn max_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     if args.is_empty() {
         return Ok(Value::Nil);
     }
@@ -325,6 +405,7 @@ pub fn random_fn(_args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn random_int_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     let min = match args.first() {
         Some(Value::Int(n)) => *n,
         _ => 0,
@@ -475,6 +556,15 @@ pub fn reverse_fn(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
+/// Clock function for timing
+pub fn clock_fn(_args: &[Value]) -> Result<Value, RuntimeError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap();
+    Ok(Value::Float(duration.as_secs_f64()))
+}
+
 // ============================================================================
 // Table functions
 // ============================================================================
@@ -540,6 +630,7 @@ pub fn table_remove_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 // ============================================================================
 
 pub fn read_file_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     let path = match args.first() {
         Some(Value::String(s)) => s,
         Some(v) => return Err(RuntimeError::TypeError {
@@ -560,6 +651,7 @@ pub fn read_file_fn(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn write_file_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
     let path = match args.first() {
         Some(Value::String(s)) => s,
         Some(v) => return Err(RuntimeError::TypeError {

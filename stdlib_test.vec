@@ -1,0 +1,67 @@
+// === STDLIB TEST ===
+
+// Core
+print("=== CORE ===")
+print(len("hello"))
+print(len([1,2,3]))
+print(len({a:1, b:2}))
+assert(true, "pass")
+
+// String functions
+print("=== STRING ===")
+print(split("a,b,c", ","))
+print(trim("  hello  "))
+print(upper("hello"))
+print(lower("HELLO"))
+print(contains("hello", "ell"))
+print(replace("foo", "o", "0"))
+
+// Array functions
+print("=== ARRAY ===")
+let arr = [3, 1, 2]
+push(arr, 4)
+print(arr)
+print(pop(arr))
+print(arr)
+insert(arr, 0, 0)
+print(arr)
+remove(arr, 0)
+print(arr)
+sort(arr)
+print(arr)
+reverse(arr)
+print(arr)
+
+// HOFs (assigned to variable)
+print("=== HOF ===")
+let m = map([1,2,3], fn(x) { x * 2 })
+print(m)
+let f = filter([1,2,3,4], fn(x) { x % 2 == 0 })
+print(f)
+let r = reduce([1,2,3,4], fn(acc, x) { acc + x }, 0)
+print(r)
+
+// Table functions
+print("=== TABLE ===")
+let t = {a: 1, b: 2, c: 3}
+print(keys(t))
+print(values(t))
+print(has_key(t, "a"))
+print(has_key(t, "z"))
+table_remove(t, "a")
+print(keys(t))
+
+// Math (bracket access)
+print("=== MATH ===")
+print(math["abs"](-5))
+print(math["floor"](3.7))
+print(math["ceil"](3.2))
+print(math["sqrt"](16))
+print(math["pow"](2, 8))
+print(math["sin"](0))
+print(math["cos"](0))
+
+// IO
+print("=== IO ===")
+io["write_file"]("/tmp/vec_test.txt", "test content")
+print(io["read_file"]("/tmp/vec_test.txt"))

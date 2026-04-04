@@ -3,9 +3,11 @@
 pub mod opcode;
 pub mod chunk;
 pub mod emit;
+pub mod optimize;
 
 pub use chunk::{Chunk, Function, Module, UpvalueInfo};
 pub use opcode::OpCode;
+pub use optimize::{Optimizer, OptLevel};
 
 use crate::parser::Stmt;
 use crate::vm::Value;
@@ -105,9 +107,20 @@ impl Compiler {
             self.emit_byte(0);
         }
 
+        // Finalize main function
+        let mut main = std::mem::replace(&mut self.function, Function::new("", 0));
+        main.finalize();
+        
+        // Finalize all functions
+        let mut functions = std::mem::take(&mut self.functions);
+        for func in &mut functions {
+            func.finalize();
+        }
+        
         Ok(Module {
-            main: std::mem::replace(&mut self.function, Function::new("", 0)),
-            functions: std::mem::take(&mut self.functions),
+            main,
+            functions,
+            strings: Vec::new(), // String interning happens at runtime
         })
     }
 

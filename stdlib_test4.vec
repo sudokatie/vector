@@ -1,0 +1,6 @@
+let m = map([1,2,3], fn(x) { x * 2 })
+print(m)
+let f = filter([1,2,3,4], fn(x) { x % 2 == 0 })
+print(f)
+let r = reduce([1,2,3,4], fn(acc, x) { acc + x }, 0)
+print(r)

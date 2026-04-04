@@ -3,13 +3,17 @@
 pub mod value;
 pub mod frame;
 pub mod execute;
+pub mod tagged_value;
+pub mod integration;
 
 pub use value::Value;
 pub use frame::CallFrame;
+pub use tagged_value::TaggedValue;
+pub use integration::{IntegratedRuntime, AdvancedFeatures, TypeSpecializer};
 
 use crate::compiler::Function;
 use crate::gc::{GC, GCStats};
-use crate::jit::{Jit, TypeTag};
+use crate::jit::Jit;
 use thiserror::Error;
 use std::rc::Rc;
 
@@ -50,10 +54,24 @@ pub enum RuntimeError {
 
     #[error("Not implemented: {0}")]
     NotImplemented(String),
+    
+    #[error("{0}")]
+    UserError(String),
 }
 
 use std::cell::RefCell;
-use value::{Closure, Upvalue};
+use value::{Closure, Upvalue, BuiltinHOF};
+
+/// Error handler for try/catch
+#[derive(Debug, Clone)]
+struct ErrorHandler {
+    /// Register to store error message
+    dst: u8,
+    /// IP to jump to on error
+    catch_ip: usize,
+    /// Frame index when handler was installed
+    frame_idx: usize,
+}
 
 /// The Vector virtual machine
 pub struct VM {
@@ -66,10 +84,16 @@ pub struct VM {
     jit_enabled: bool,
     /// Garbage collector
     gc: GC,
+    /// Integrated runtime (generational GC, IC, OSR, deopt)
+    integrated: IntegratedRuntime,
+    /// Type specializer for JIT
+    type_specializer: TypeSpecializer,
     /// Current closure's upvalues (for the currently executing closure)
     current_upvalues: Vec<Rc<RefCell<Upvalue>>>,
     /// Open upvalues that haven't been closed yet
     open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    /// Stack of error handlers for try/catch
+    error_handlers: Vec<ErrorHandler>,
 }
 
 impl VM {
@@ -81,8 +105,11 @@ impl VM {
             jit: Some(Jit::new()),
             jit_enabled: true,
             gc: GC::new(),
+            integrated: IntegratedRuntime::new(),
+            type_specializer: TypeSpecializer::new(),
             current_upvalues: Vec::new(),
             open_upvalues: Vec::new(),
+            error_handlers: Vec::new(),
         };
         vm.register_stdlib();
         vm
@@ -90,6 +117,9 @@ impl VM {
 
     /// Create VM without JIT (interpreter only)
     pub fn new_without_jit() -> Self {
+        let mut features = AdvancedFeatures::default();
+        features.osr = false;
+        
         let mut vm = Self {
             frames: Vec::with_capacity(64),
             functions: Vec::new(),
@@ -97,8 +127,11 @@ impl VM {
             jit: None,
             jit_enabled: false,
             gc: GC::new(),
+            integrated: IntegratedRuntime::with_features(features),
+            type_specializer: TypeSpecializer::new(),
             current_upvalues: Vec::new(),
             open_upvalues: Vec::new(),
+            error_handlers: Vec::new(),
         };
         vm.register_stdlib();
         vm
@@ -113,8 +146,11 @@ impl VM {
             jit: Some(Jit::new()),
             jit_enabled: true,
             gc: GC::with_heap_size(heap_size),
+            integrated: IntegratedRuntime::new(),
+            type_specializer: TypeSpecializer::new(),
             current_upvalues: Vec::new(),
             open_upvalues: Vec::new(),
+            error_handlers: Vec::new(),
         };
         vm.register_stdlib();
         vm
@@ -207,9 +243,12 @@ impl VM {
         self.globals.insert("reverse".to_string(), Value::NativeFunction(stdlib::reverse_fn));
         
         // === Higher-order array functions (need VM access) ===
-        self.globals.insert("map".to_string(), Value::BuiltinHOF(value::BuiltinHOF::Map));
-        self.globals.insert("filter".to_string(), Value::BuiltinHOF(value::BuiltinHOF::Filter));
-        self.globals.insert("reduce".to_string(), Value::BuiltinHOF(value::BuiltinHOF::Reduce));
+        self.globals.insert("map".to_string(), Value::BuiltinHOF(BuiltinHOF::Map));
+        self.globals.insert("filter".to_string(), Value::BuiltinHOF(BuiltinHOF::Filter));
+        self.globals.insert("reduce".to_string(), Value::BuiltinHOF(BuiltinHOF::Reduce));
+        
+        // === Timing ===
+        self.globals.insert("clock".to_string(), Value::NativeFunction(stdlib::clock_fn));
         
         // === Table functions ===
         self.globals.insert("keys".to_string(), Value::NativeFunction(stdlib::keys_fn));

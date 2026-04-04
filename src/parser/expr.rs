@@ -151,11 +151,95 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Try(Box::new(expr)))
             }
 
+            // Match expression: match value { arms }
+            TokenKind::Match => {
+                self.parse_match_expression()
+            }
+
             _ => Err(ParseError::UnexpectedToken {
                 found: format!("{}", token.kind),
                 expected: "expression".to_string(),
                 line: token.line,
             }),
+        }
+    }
+
+    /// Parse match expression: match value { pattern => expr, ... }
+    fn parse_match_expression(&mut self) -> Result<Expr, ParseError> {
+        self.advance()?; // consume 'match'
+        
+        let value = self.parse_expr()?;
+        self.expect(TokenKind::LeftBrace)?;
+        
+        let mut arms = Vec::new();
+        
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            arms.push(self.parse_match_arm_expr()?);
+            // Optional comma between arms
+            self.match_token(TokenKind::Comma)?;
+        }
+        
+        self.expect(TokenKind::RightBrace)?;
+        
+        Ok(Expr::Match(Box::new(value), arms))
+    }
+
+    /// Parse a single match arm for expression context
+    fn parse_match_arm_expr(&mut self) -> Result<super::ast::MatchArm, ParseError> {
+        let pattern = self.parse_pattern_expr()?;
+        
+        // Optional guard: if condition
+        let guard = if self.match_token(TokenKind::If)? {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        
+        self.expect(TokenKind::FatArrow)?;
+        
+        // Body can be a block or single expression
+        let body = if self.check(&TokenKind::LeftBrace) {
+            self.advance()?;
+            let stmts = self.parse_block_stmts()?;
+            self.expect(TokenKind::RightBrace)?;
+            Expr::Block(stmts)
+        } else {
+            self.parse_expr()?
+        };
+        
+        Ok(super::ast::MatchArm { pattern, guard, body })
+    }
+
+    /// Parse pattern for match expression
+    fn parse_pattern_expr(&mut self) -> Result<super::ast::Pattern, ParseError> {
+        // Wildcard pattern: _
+        if let Some(token) = &self.current {
+            if let TokenKind::Identifier(name) = &token.kind {
+                if name == "_" {
+                    self.advance()?;
+                    return Ok(super::ast::Pattern::Wildcard);
+                }
+            }
+        }
+        
+        // Try to parse a literal or range
+        let expr = self.parse_expr()?;
+        
+        // Check if it's a range pattern
+        match &expr {
+            Expr::Binary(left, BinaryOp::Range, right) => {
+                return Ok(super::ast::Pattern::Range(left.clone(), right.clone(), false));
+            }
+            Expr::Binary(left, BinaryOp::RangeInclusive, right) => {
+                return Ok(super::ast::Pattern::Range(left.clone(), right.clone(), true));
+            }
+            _ => {}
+        }
+        
+        // Check if it's a binding (identifier) or literal
+        match expr {
+            Expr::Identifier(name) => Ok(super::ast::Pattern::Binding(name)),
+            _ => Ok(super::ast::Pattern::Literal(expr)),
         }
     }
 

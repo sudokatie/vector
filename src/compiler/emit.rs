@@ -416,15 +416,23 @@ impl Compiler {
             }
 
             Expr::Try(inner) => {
-                // Try expression - wraps result in a Result-like table
-                // { ok: true, value: result } or { ok: false, err: error_msg }
-                // For now, we just compile the inner expression and wrap success
-                // Real error handling would need VM support for catch/throw
+                // Try expression with proper error handling
+                // Returns { ok: bool, value/_error: ..., is_err: fn, err: fn, unwrap: fn }
+                // Note: error message stored in "_error" field (private), accessed via err() method
                 
-                // Compile inner expression
+                // TryStart: dst, catch_offset
+                // If an error occurs during inner expr, VM jumps to catch_offset
+                self.emit(OpCode::TryStart);
+                self.emit_byte(dst);
+                let catch_jump = self.emit_jump_placeholder();
+                
+                // Compile inner expression - result goes to dst
                 self.compile_expr(inner, dst)?;
                 
-                // Create result table { ok: true, value: <result> }
+                // TryEnd - pop error handler
+                self.emit(OpCode::TryEnd);
+                
+                // === Success path: build { ok: true, value: result, is_err: fn, err: fn } ===
                 self.emit(OpCode::NewTable);
                 self.emit_byte(dst + 1);
                 
@@ -450,10 +458,128 @@ impl Compiler {
                 self.emit_byte(dst + 2);
                 self.emit_byte(dst);
                 
+                // Add is_err method
+                let is_err_idx = self.add_constant(Value::String("is_err".to_string()))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(is_err_idx);
+                let is_err_fn = self.add_constant(Value::NativeFunction(crate::runtime::stdlib::result_is_err_fn))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 3);
+                self.emit_u16(is_err_fn);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Add err method
+                let err_method_idx = self.add_constant(Value::String("err".to_string()))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(err_method_idx);
+                let err_fn = self.add_constant(Value::NativeFunction(crate::runtime::stdlib::result_err_fn))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 3);
+                self.emit_u16(err_fn);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Add unwrap method
+                let unwrap_idx = self.add_constant(Value::String("unwrap".to_string()))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(unwrap_idx);
+                let unwrap_fn = self.add_constant(Value::NativeFunction(crate::runtime::stdlib::result_unwrap_fn))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 3);
+                self.emit_u16(unwrap_fn);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
                 // Move result table to dst
                 self.emit(OpCode::Move);
                 self.emit_byte(dst);
                 self.emit_byte(dst + 1);
+                
+                // Jump past error handler
+                self.emit(OpCode::Jump);
+                let end_jump = self.emit_jump_placeholder();
+                
+                // === Error path (catch handler) ===
+                self.patch_jump(catch_jump);
+                
+                // Error message is in dst (set by VM on error)
+                // Build { ok: false, _error: message, is_err: fn, err: fn }
+                self.emit(OpCode::NewTable);
+                self.emit_byte(dst + 1);
+                
+                // Set ok = false
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(ok_idx);
+                self.emit(OpCode::LoadFalse);
+                self.emit_byte(dst + 3);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Set _error = error message (in dst from VM) - internal storage
+                let error_storage_idx = self.add_constant(Value::String("_error".to_string()))?;
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(error_storage_idx);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst);
+                
+                // Add is_err method
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(is_err_idx);
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 3);
+                self.emit_u16(is_err_fn);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Add err method (returns the error message from _error field)
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(err_method_idx);
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 3);
+                self.emit_u16(err_fn);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Add unwrap method
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 2);
+                self.emit_u16(unwrap_idx);
+                self.emit(OpCode::LoadConst);
+                self.emit_byte(dst + 3);
+                self.emit_u16(unwrap_fn);
+                self.emit(OpCode::TableSet);
+                self.emit_byte(dst + 1);
+                self.emit_byte(dst + 2);
+                self.emit_byte(dst + 3);
+                
+                // Move result table to dst
+                self.emit(OpCode::Move);
+                self.emit_byte(dst);
+                self.emit_byte(dst + 1);
+                
+                self.patch_jump(end_jump);
             }
 
             Expr::Interpolation(parts) => {
@@ -711,11 +837,13 @@ impl Compiler {
                     let slot = self.declare_local(name)?;
                     self.compile_function(def, slot)?;
                 } else {
-                    self.compile_function(def, 0)?;
+                    // Use a temp register to avoid overwriting locals
+                    let temp = self.next_temp_register();
+                    self.compile_function(def, temp)?;
                     let idx = self.add_name(name)?;
                     self.emit(OpCode::SetGlobal);
                     self.emit_u16(idx);
-                    self.emit_byte(0);
+                    self.emit_byte(temp);
                 }
             }
         }
@@ -740,14 +868,44 @@ impl Compiler {
             func_compiler.declare_local(param)?;
         }
 
-        // Compile body
-        for stmt in &def.body {
-            func_compiler.compile_stmt(stmt)?;
+        // Compile body - handle implicit return of last expression
+        let body_len = def.body.len();
+        for (i, stmt) in def.body.iter().enumerate() {
+            let is_last = i == body_len - 1;
+            
+            if is_last {
+                // Check if last statement is an expression - return it implicitly
+                match stmt {
+                    crate::parser::Stmt::Expr(expr) => {
+                        // Compile expression to temp register
+                        let temp = func_compiler.next_temp_register();
+                        func_compiler.compile_expr(expr, temp)?;
+                        // Return it
+                        func_compiler.emit(OpCode::Return);
+                        func_compiler.emit_byte(0);
+                        func_compiler.emit_byte(temp);
+                    }
+                    crate::parser::Stmt::Return(_) => {
+                        // Explicit return - compile normally
+                        func_compiler.compile_stmt(stmt)?;
+                    }
+                    _ => {
+                        // Other statement types - compile and return nil
+                        func_compiler.compile_stmt(stmt)?;
+                        func_compiler.emit(OpCode::ReturnNil);
+                        func_compiler.emit_byte(0);
+                    }
+                }
+            } else {
+                func_compiler.compile_stmt(stmt)?;
+            }
         }
 
-        // Implicit return nil
-        func_compiler.emit(OpCode::ReturnNil);
-        func_compiler.emit_byte(0);
+        // Handle empty body
+        if def.body.is_empty() {
+            func_compiler.emit(OpCode::ReturnNil);
+            func_compiler.emit_byte(0);
+        }
 
         func_compiler.end_scope();
 
