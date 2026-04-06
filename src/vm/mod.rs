@@ -5,8 +5,10 @@ pub mod frame;
 pub mod execute;
 pub mod tagged_value;
 pub mod integration;
+pub mod debugger;
 
 pub use value::Value;
+pub use debugger::{Debugger, DebugCommand, DebugVM};
 pub use frame::CallFrame;
 pub use tagged_value::TaggedValue;
 pub use integration::{IntegratedRuntime, AdvancedFeatures, TypeSpecializer};
