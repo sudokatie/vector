@@ -707,6 +707,344 @@ pub fn input_fn(args: &[Value]) -> Result<Value, RuntimeError> {
     read_line_fn(&[])
 }
 
+// ============================================================================
+// Additional String functions
+// ============================================================================
+
+pub fn starts_with_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match (args.first(), args.get(1)) {
+        (Some(Value::String(s)), Some(Value::String(prefix))) => {
+            Ok(Value::Bool(s.starts_with(prefix.as_str())))
+        }
+        (Some(v), _) => Err(RuntimeError::TypeError {
+            expected: "string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+pub fn ends_with_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match (args.first(), args.get(1)) {
+        (Some(Value::String(s)), Some(Value::String(suffix))) => {
+            Ok(Value::Bool(s.ends_with(suffix.as_str())))
+        }
+        (Some(v), _) => Err(RuntimeError::TypeError {
+            expected: "string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+pub fn substr_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let s = match args.first() {
+        Some(Value::String(s)) => s,
+        Some(v) => return Err(RuntimeError::TypeError {
+            expected: "string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => return Ok(Value::String(String::new())),
+    };
+    
+    let start = match args.get(1) {
+        Some(Value::Int(i)) => *i as usize,
+        _ => 0,
+    };
+    
+    let len = match args.get(2) {
+        Some(Value::Int(i)) => Some(*i as usize),
+        _ => None,
+    };
+    
+    let chars: Vec<char> = s.chars().collect();
+    if start >= chars.len() {
+        return Ok(Value::String(String::new()));
+    }
+    
+    let end = match len {
+        Some(l) => (start + l).min(chars.len()),
+        None => chars.len(),
+    };
+    
+    Ok(Value::String(chars[start..end].iter().collect()))
+}
+
+pub fn char_at_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match (args.first(), args.get(1)) {
+        (Some(Value::String(s)), Some(Value::Int(idx))) => {
+            let chars: Vec<char> = s.chars().collect();
+            let idx = *idx as usize;
+            if idx < chars.len() {
+                Ok(Value::String(chars[idx].to_string()))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        (Some(v), _) => Err(RuntimeError::TypeError {
+            expected: "string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        _ => Ok(Value::Nil),
+    }
+}
+
+pub fn repeat_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match (args.first(), args.get(1)) {
+        (Some(Value::String(s)), Some(Value::Int(n))) => {
+            let n = (*n).max(0) as usize;
+            Ok(Value::String(s.repeat(n)))
+        }
+        (Some(v), _) => Err(RuntimeError::TypeError {
+            expected: "string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        _ => Ok(Value::String(String::new())),
+    }
+}
+
+pub fn join_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let arr = match args.first() {
+        Some(Value::Array(a)) => a,
+        Some(v) => return Err(RuntimeError::TypeError {
+            expected: "array".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => return Ok(Value::String(String::new())),
+    };
+    
+    let sep = match args.get(1) {
+        Some(Value::String(s)) => s.as_str(),
+        _ => "",
+    };
+    
+    let strings: Vec<String> = arr.borrow().iter().map(|v| format!("{}", v)).collect();
+    Ok(Value::String(strings.join(sep)))
+}
+
+// ============================================================================
+// Additional Number functions
+// ============================================================================
+
+pub fn round_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
+    match args.first() {
+        Some(Value::Int(n)) => Ok(Value::Int(*n)),
+        Some(Value::Float(n)) => Ok(Value::Int(n.round() as i64)),
+        Some(v) => Err(RuntimeError::TypeError {
+            expected: "number".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => Ok(Value::Int(0)),
+    }
+}
+
+pub fn trunc_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
+    match args.first() {
+        Some(Value::Int(n)) => Ok(Value::Int(*n)),
+        Some(Value::Float(n)) => Ok(Value::Int(n.trunc() as i64)),
+        Some(v) => Err(RuntimeError::TypeError {
+            expected: "number".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => Ok(Value::Int(0)),
+    }
+}
+
+pub fn clamp_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
+    let val = match args.first() {
+        Some(Value::Int(n)) => *n as f64,
+        Some(Value::Float(n)) => *n,
+        Some(v) => return Err(RuntimeError::TypeError {
+            expected: "number".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => return Ok(Value::Int(0)),
+    };
+    
+    let min_val = match args.get(1) {
+        Some(Value::Int(n)) => *n as f64,
+        Some(Value::Float(n)) => *n,
+        _ => f64::NEG_INFINITY,
+    };
+    
+    let max_val = match args.get(2) {
+        Some(Value::Int(n)) => *n as f64,
+        Some(Value::Float(n)) => *n,
+        _ => f64::INFINITY,
+    };
+    
+    let clamped = val.clamp(min_val, max_val);
+    
+    // Return same type as input
+    match args.first() {
+        Some(Value::Int(_)) => Ok(Value::Int(clamped as i64)),
+        _ => Ok(Value::Float(clamped)),
+    }
+}
+
+pub fn sign_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let args = skip_self(args);
+    match args.first() {
+        Some(Value::Int(n)) => Ok(Value::Int(n.signum())),
+        Some(Value::Float(n)) => {
+            if n.is_nan() {
+                Ok(Value::Float(f64::NAN))
+            } else if *n > 0.0 {
+                Ok(Value::Int(1))
+            } else if *n < 0.0 {
+                Ok(Value::Int(-1))
+            } else {
+                Ok(Value::Int(0))
+            }
+        }
+        Some(v) => Err(RuntimeError::TypeError {
+            expected: "number".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => Ok(Value::Int(0)),
+    }
+}
+
+// ============================================================================
+// Additional Array functions
+// ============================================================================
+
+pub fn slice_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match args.first() {
+        Some(Value::Array(arr)) => {
+            let arr = arr.borrow();
+            let len = arr.len() as i64;
+            
+            let start = match args.get(1) {
+                Some(Value::Int(i)) => {
+                    let i = *i;
+                    if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
+                }
+                _ => 0,
+            };
+            
+            let end = match args.get(2) {
+                Some(Value::Int(i)) => {
+                    let i = *i;
+                    if i < 0 { (len + i).max(0) as usize } else { i.min(len) as usize }
+                }
+                _ => arr.len(),
+            };
+            
+            let sliced: Vec<Value> = if start < end && start < arr.len() {
+                arr[start..end.min(arr.len())].to_vec()
+            } else {
+                Vec::new()
+            };
+            
+            Ok(Value::Array(Rc::new(RefCell::new(sliced))))
+        }
+        Some(v) => Err(RuntimeError::TypeError {
+            expected: "array".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        None => Ok(Value::Array(Rc::new(RefCell::new(Vec::new())))),
+    }
+}
+
+pub fn concat_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut result = Vec::new();
+    
+    for arg in args {
+        match arg {
+            Value::Array(arr) => {
+                result.extend(arr.borrow().iter().cloned());
+            }
+            _ => result.push(arg.clone()),
+        }
+    }
+    
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+pub fn index_of_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match (args.first(), args.get(1)) {
+        (Some(Value::Array(arr)), Some(val)) => {
+            let arr = arr.borrow();
+            for (i, item) in arr.iter().enumerate() {
+                if item == val {
+                    return Ok(Value::Int(i as i64));
+                }
+            }
+            Ok(Value::Int(-1))
+        }
+        (Some(Value::String(s)), Some(Value::String(sub))) => {
+            match s.find(sub.as_str()) {
+                Some(idx) => Ok(Value::Int(idx as i64)),
+                None => Ok(Value::Int(-1)),
+            }
+        }
+        (Some(v), _) => Err(RuntimeError::TypeError {
+            expected: "array or string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        _ => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn last_index_of_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match (args.first(), args.get(1)) {
+        (Some(Value::Array(arr)), Some(val)) => {
+            let arr = arr.borrow();
+            for (i, item) in arr.iter().enumerate().rev() {
+                if item == val {
+                    return Ok(Value::Int(i as i64));
+                }
+            }
+            Ok(Value::Int(-1))
+        }
+        (Some(Value::String(s)), Some(Value::String(sub))) => {
+            match s.rfind(sub.as_str()) {
+                Some(idx) => Ok(Value::Int(idx as i64)),
+                None => Ok(Value::Int(-1)),
+            }
+        }
+        (Some(v), _) => Err(RuntimeError::TypeError {
+            expected: "array or string".to_string(),
+            got: v.type_name().to_string(),
+        }),
+        _ => Ok(Value::Int(-1)),
+    }
+}
+
+/// Parse string to int
+pub fn parse_int_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match args.first() {
+        Some(Value::String(s)) => {
+            match s.trim().parse::<i64>() {
+                Ok(n) => Ok(Value::Int(n)),
+                Err(_) => Ok(Value::Nil),
+            }
+        }
+        Some(Value::Int(n)) => Ok(Value::Int(*n)),
+        Some(Value::Float(n)) => Ok(Value::Int(*n as i64)),
+        _ => Ok(Value::Nil),
+    }
+}
+
+/// Parse string to float
+pub fn parse_float_fn(args: &[Value]) -> Result<Value, RuntimeError> {
+    match args.first() {
+        Some(Value::String(s)) => {
+            match s.trim().parse::<f64>() {
+                Ok(n) => Ok(Value::Float(n)),
+                Err(_) => Ok(Value::Nil),
+            }
+        }
+        Some(Value::Int(n)) => Ok(Value::Float(*n as f64)),
+        Some(Value::Float(n)) => Ok(Value::Float(*n)),
+        _ => Ok(Value::Nil),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,5 +1111,183 @@ mod tests {
             Value::String("rust".to_string()),
         ]).unwrap();
         assert_eq!(result, Value::String("hello rust".to_string()));
+    }
+
+    #[test]
+    fn test_starts_with() {
+        let result = starts_with_fn(&[
+            Value::String("hello world".to_string()),
+            Value::String("hello".to_string()),
+        ]).unwrap();
+        assert_eq!(result, Value::Bool(true));
+        
+        let result2 = starts_with_fn(&[
+            Value::String("hello world".to_string()),
+            Value::String("world".to_string()),
+        ]).unwrap();
+        assert_eq!(result2, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_ends_with() {
+        let result = ends_with_fn(&[
+            Value::String("hello world".to_string()),
+            Value::String("world".to_string()),
+        ]).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_substr() {
+        let result = substr_fn(&[
+            Value::String("hello".to_string()),
+            Value::Int(1),
+            Value::Int(3),
+        ]).unwrap();
+        assert_eq!(result, Value::String("ell".to_string()));
+        
+        // Without length
+        let result2 = substr_fn(&[
+            Value::String("hello".to_string()),
+            Value::Int(2),
+        ]).unwrap();
+        assert_eq!(result2, Value::String("llo".to_string()));
+    }
+
+    #[test]
+    fn test_char_at() {
+        let result = char_at_fn(&[
+            Value::String("hello".to_string()),
+            Value::Int(1),
+        ]).unwrap();
+        assert_eq!(result, Value::String("e".to_string()));
+        
+        // Out of bounds
+        let result2 = char_at_fn(&[
+            Value::String("hi".to_string()),
+            Value::Int(5),
+        ]).unwrap();
+        assert_eq!(result2, Value::Nil);
+    }
+
+    #[test]
+    fn test_repeat() {
+        let result = repeat_fn(&[
+            Value::String("ab".to_string()),
+            Value::Int(3),
+        ]).unwrap();
+        assert_eq!(result, Value::String("ababab".to_string()));
+    }
+
+    #[test]
+    fn test_join() {
+        let arr = Value::Array(Rc::new(RefCell::new(vec![
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+            Value::String("c".to_string()),
+        ])));
+        let result = join_fn(&[arr, Value::String(",".to_string())]).unwrap();
+        assert_eq!(result, Value::String("a,b,c".to_string()));
+    }
+
+    #[test]
+    fn test_round() {
+        assert_eq!(round_fn(&[Value::Float(3.7)]).unwrap(), Value::Int(4));
+        assert_eq!(round_fn(&[Value::Float(3.2)]).unwrap(), Value::Int(3));
+        assert_eq!(round_fn(&[Value::Float(-3.5)]).unwrap(), Value::Int(-4));
+    }
+
+    #[test]
+    fn test_trunc() {
+        assert_eq!(trunc_fn(&[Value::Float(3.9)]).unwrap(), Value::Int(3));
+        assert_eq!(trunc_fn(&[Value::Float(-3.9)]).unwrap(), Value::Int(-3));
+    }
+
+    #[test]
+    fn test_clamp() {
+        assert_eq!(clamp_fn(&[Value::Int(15), Value::Int(0), Value::Int(10)]).unwrap(), Value::Int(10));
+        assert_eq!(clamp_fn(&[Value::Int(-5), Value::Int(0), Value::Int(10)]).unwrap(), Value::Int(0));
+        assert_eq!(clamp_fn(&[Value::Int(5), Value::Int(0), Value::Int(10)]).unwrap(), Value::Int(5));
+    }
+
+    #[test]
+    fn test_sign() {
+        assert_eq!(sign_fn(&[Value::Int(42)]).unwrap(), Value::Int(1));
+        assert_eq!(sign_fn(&[Value::Int(-42)]).unwrap(), Value::Int(-1));
+        assert_eq!(sign_fn(&[Value::Int(0)]).unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn test_slice() {
+        let arr = Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4),
+            Value::Int(5),
+        ])));
+        
+        let result = slice_fn(&[arr.clone(), Value::Int(1), Value::Int(4)]).unwrap();
+        match result {
+            Value::Array(a) => {
+                let borrowed = a.borrow();
+                assert_eq!(borrowed.len(), 3);
+                assert_eq!(borrowed[0], Value::Int(2));
+            }
+            _ => panic!("Expected array"),
+        }
+        
+        // Negative indices
+        let result2 = slice_fn(&[arr, Value::Int(-2)]).unwrap();
+        match result2 {
+            Value::Array(a) => assert_eq!(a.borrow().len(), 2),
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_concat() {
+        let arr1 = Value::Array(Rc::new(RefCell::new(vec![Value::Int(1), Value::Int(2)])));
+        let arr2 = Value::Array(Rc::new(RefCell::new(vec![Value::Int(3), Value::Int(4)])));
+        
+        let result = concat_fn(&[arr1, arr2]).unwrap();
+        match result {
+            Value::Array(a) => assert_eq!(a.borrow().len(), 4),
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_index_of() {
+        let arr = Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ])));
+        
+        assert_eq!(index_of_fn(&[arr.clone(), Value::Int(2)]).unwrap(), Value::Int(1));
+        assert_eq!(index_of_fn(&[arr, Value::Int(5)]).unwrap(), Value::Int(-1));
+        
+        // String variant
+        assert_eq!(
+            index_of_fn(&[Value::String("hello".to_string()), Value::String("ll".to_string())]).unwrap(),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn test_parse_int() {
+        assert_eq!(parse_int_fn(&[Value::String("42".to_string())]).unwrap(), Value::Int(42));
+        assert_eq!(parse_int_fn(&[Value::String("  -10  ".to_string())]).unwrap(), Value::Int(-10));
+        assert_eq!(parse_int_fn(&[Value::String("abc".to_string())]).unwrap(), Value::Nil);
+    }
+
+    #[test]
+    fn test_parse_float() {
+        let result = parse_float_fn(&[Value::String("3.14".to_string())]).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 3.14).abs() < 0.0001),
+            _ => panic!("Expected float"),
+        }
     }
 }
