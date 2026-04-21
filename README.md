@@ -6,7 +6,7 @@ A JIT-compiled scripting language with a register-based VM, written in Rust.
 
 - **Lua-like syntax** with modern ergonomics
 - **Register-based bytecode VM** for efficient execution
-- **JIT compilation** via Cranelift (coming soon)
+- **JIT compilation** via Cranelift
 - **Dynamic typing** with nil, bool, int, float, string, array, table
 - **First-class functions** and closures
 - **Interactive REPL** with readline support
